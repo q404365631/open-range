@@ -30,7 +30,7 @@ class ComposeProjectRunner:
         build_timeout_s: float = 300.0,
         up_timeout_s: float = 300.0,
         down_timeout_s: float = 120.0,
-        health_timeout_s: float = 300.0,
+        health_timeout_s: float = 120.0,
         health_poll_interval_s: float = 2.0,
         remove_volumes: bool = True,
     ) -> None:
@@ -111,14 +111,7 @@ class ComposeProjectRunner:
                 container_ids=container_ids,
             ),
         )
-        try:
-            self._wait_until_healthy(project, services)
-        except Exception:
-            try:
-                self.teardown(project)
-            except Exception:
-                pass
-            raise
+        self._wait_until_healthy(project, services)
         return project
 
     def teardown(self, project: BootedSnapshotProject) -> None:
