@@ -29,7 +29,10 @@ cleanup() {
     wait 2>/dev/null || true
     echo "[start.sh] All services stopped."
 }
-trap cleanup EXIT INT TERM
+# Only trap INT/TERM (not EXIT) -- services should survive script exit
+# when called from RangeEnvironment.reset(). The environment manages
+# service lifecycle via _stop_services() / _start_snapshot_services().
+trap cleanup INT TERM
 
 # ── Parse snapshot topology ───────────────────────────────────────────────────
 

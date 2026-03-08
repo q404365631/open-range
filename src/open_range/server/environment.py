@@ -126,6 +126,12 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         self._episode_recorded = False
         self._active_project: "BootedSnapshotProject | None" = None
 
+        # Service PIDs tracked for subprocess mode lifecycle
+        self._service_pids: list[int] = []
+
+        # Zone router for subprocess mode enforcement
+        self._zone_router: Any = None
+
         # Execution mode: "auto", "docker", or "subprocess"
         self._execution_mode = execution_mode
         if execution_mode == "auto":
@@ -465,6 +471,166 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
             "Snapshot application complete (subprocess): %d/%d artifacts deployed",
             deployed, len(snapshot.files),
         )
+
+    # -----------------------------------------------------------------
+    # Service lifecycle (subprocess mode)
+    # -----------------------------------------------------------------
+
+    # Map topology host names to service start commands.
+    # Each entry is (service_name, start_commands, readiness_check).
+    _HOST_SERVICE_MAP: dict[str, tuple[list[list[str]], list[str] | None]] = {
+        "db": (
+            [
+                ["bash", "-c", "mkdir -p /var/run/mysqld && chown mysql:mysql /var/run/mysqld 2>/dev/null; mkdir -p /var/log/mysql && chown mysql:mysql /var/log/mysql 2>/dev/null; true"],
+                ["bash", "-c", "test -d /var/lib/mysql/mysql || { CMD=$(command -v mariadb-install-db || command -v mysql_install_db || echo ''); [ -n \"$CMD\" ] && $CMD --user=mysql 2>/dev/null; true; }"],
+                ["bash", "-c", "MYSQLD=$(command -v mariadbd || command -v mysqld || echo ''); [ -n \"$MYSQLD\" ] && $MYSQLD --user=mysql --log-error=/var/log/mysql/error.log &"],
+            ],
+            ["bash", "-c", "ADMIN=$(command -v mariadb-admin || command -v mysqladmin || echo ''); [ -n \"$ADMIN\" ] && $ADMIN ping --silent 2>/dev/null"],
+        ),
+        "web": (
+            [
+                ["bash", "-c", "mkdir -p /var/log/nginx; nginx -g 'daemon off;' > /var/log/nginx/access.log 2>&1 &"],
+            ],
+            ["bash", "-c", "curl -sf http://localhost:80/ >/dev/null 2>&1"],
+        ),
+        "ldap": (
+            [
+                ["bash", "-c", "mkdir -p /var/run/slapd; slapd -h 'ldap:/// ldapi:///' -u openldap -g openldap 2>/dev/null &"],
+            ],
+            ["bash", "-c", "ldapsearch -x -H ldap://localhost -b '' -s base namingContexts >/dev/null 2>&1"],
+        ),
+        "siem": (
+            [
+                ["bash", "-c", "mkdir -p /var/log/siem/consolidated; command -v rsyslogd >/dev/null 2>&1 && rsyslogd -n &"],
+            ],
+            None,  # rsyslog starts fast, no readiness check needed
+        ),
+        "files": (
+            [
+                ["bash", "-c", "mkdir -p /var/lib/samba/private; command -v smbd >/dev/null 2>&1 && smbd --foreground --no-process-group &"],
+            ],
+            None,
+        ),
+        "mail": (
+            [
+                ["bash", "-c", "command -v postfix >/dev/null 2>&1 && postfix start 2>/dev/null || true"],
+            ],
+            None,
+        ),
+    }
+
+    def _stop_services(self) -> None:
+        """Stop services started by a previous episode."""
+        import signal
+
+        for pid in self._service_pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                logger.debug("Failed to stop PID %d: %s", pid, exc)
+
+        # Also stop known service processes by name (catches orphans)
+        sp.run(
+            ["bash", "-c",
+             "for proc in nginx mysqld mariadbd slapd rsyslogd smbd postfix sshd; do "
+             "pkill -x $proc 2>/dev/null || true; done"],
+            capture_output=True, timeout=5,
+        )
+        self._service_pids = []
+        logger.info("Stopped previous episode services")
+
+    def _start_snapshot_services(self, snapshot: SnapshotSpec) -> None:
+        """Start services based on snapshot topology (subprocess mode only).
+
+        Reads the ``hosts`` list from the topology and starts the
+        corresponding service daemons.  Waits for readiness where applicable.
+        """
+        if self._execution_mode != "subprocess":
+            return
+
+        topology = snapshot.topology if isinstance(snapshot.topology, dict) else {}
+        hosts = topology.get("hosts", [])
+        if not hosts:
+            logger.info("No hosts in topology — skipping service provisioning")
+            return
+
+        # Normalize host names (may be strings or dicts)
+        host_names: list[str] = []
+        for h in hosts:
+            if isinstance(h, str):
+                host_names.append(h)
+            elif isinstance(h, dict):
+                host_names.append(h.get("name", h.get("hostname", "")))
+
+        # Create log directories
+        os.makedirs("/var/log/siem/consolidated", exist_ok=True)
+
+        started = []
+        for host in host_names:
+            entry = self._HOST_SERVICE_MAP.get(host)
+            if entry is None:
+                logger.debug("Host '%s' has no mapped service (agent-only)", host)
+                continue
+
+            start_cmds, readiness_check = entry
+            logger.info("Starting service for host: %s", host)
+
+            for cmd in start_cmds:
+                try:
+                    result = sp.run(cmd, capture_output=True, timeout=30, text=True)
+                    if result.returncode != 0 and result.stderr:
+                        logger.debug("Service cmd stderr for %s: %s", host, result.stderr[:200])
+                except Exception as exc:
+                    logger.warning("Failed to start service for %s: %s", host, exc)
+
+            # Wait for readiness
+            if readiness_check:
+                ready = False
+                for attempt in range(30):
+                    try:
+                        check = sp.run(readiness_check, capture_output=True, timeout=3)
+                        if check.returncode == 0:
+                            logger.info("  %s: ready (%ds)", host, attempt + 1)
+                            ready = True
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(1)
+                if not ready:
+                    logger.warning("  %s: readiness timeout", host)
+            else:
+                logger.info("  %s: started (no readiness check)", host)
+
+            started.append(host)
+
+        # Start SSH if any non-agent hosts exist
+        non_agent_hosts = [h for h in host_names if h not in ("attacker", "siem")]
+        if non_agent_hosts:
+            try:
+                sp.run(
+                    ["bash", "-c", "mkdir -p /var/run/sshd; command -v sshd >/dev/null 2>&1 && /usr/sbin/sshd 2>/dev/null &"],
+                    capture_output=True, timeout=5,
+                )
+                logger.info("  sshd: started")
+            except Exception:
+                pass
+
+        # Capture PIDs of started service processes
+        try:
+            result = sp.run(
+                ["bash", "-c", "pgrep -x 'nginx|mysqld|mariadbd|slapd|rsyslogd|smbd|sshd' 2>/dev/null || true"],
+                capture_output=True, timeout=5, text=True,
+            )
+            for line in result.stdout.strip().split("\n"):
+                line = line.strip()
+                if line.isdigit():
+                    self._service_pids.append(int(line))
+        except Exception:
+            pass
+
+        logger.info("Service provisioning complete: %s", ", ".join(started) or "none")
 
     # -----------------------------------------------------------------
     # NPC lifecycle
@@ -907,6 +1073,10 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         self._stop_npcs()
         self._teardown_active_project()
 
+        # Stop services from previous episode (subprocess mode)
+        if self._execution_mode == "subprocess" and self._service_pids:
+            self._stop_services()
+
         # Select snapshot
         self._snapshot = self._select_snapshot(**kwargs)
 
@@ -940,6 +1110,16 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         activated = self._activate_runtime_snapshot(self._snapshot, episode_id=eid)
         if not activated:
             self._apply_snapshot(self._snapshot)
+
+        # Start services based on snapshot topology (subprocess mode)
+        self._start_snapshot_services(self._snapshot)
+
+        # Initialize zone router from topology (subprocess mode)
+        if self._execution_mode == "subprocess":
+            from open_range.server.zone_router import ZoneRouter
+
+            topology = self._snapshot.topology if isinstance(self._snapshot.topology, dict) else {}
+            self._zone_router = ZoneRouter.from_snapshot(topology)
 
         # Start NPC traffic for this episode
         self._start_npcs(self._snapshot)
