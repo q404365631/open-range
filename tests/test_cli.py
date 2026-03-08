@@ -233,6 +233,8 @@ def test_deploy_installs_rendered_chart_on_kind_cluster(
 
     compose_dir = tmp_path / "deploy"
     commands: list[list[str]] = []
+    prepared: list[str] = []
+    boot_calls: list[dict[str, object]] = []
 
     class FakeRenderer:
         def render(self, spec, output_dir):
@@ -242,13 +244,37 @@ def test_deploy_installs_rendered_chart_on_kind_cluster(
             (output_dir / "kind-config.yaml").write_text("kind: Cluster\n", encoding="utf-8")
             return output_dir
 
+    class FakeHelmRunner:
+        def prepare_images(self, chart_dir):
+            prepared.append(str(chart_dir))
+
+        def boot(self, *, snapshot_id, artifacts_dir, compose=None, project_name=None):
+            boot_calls.append(
+                {
+                    "snapshot_id": snapshot_id,
+                    "artifacts_dir": str(artifacts_dir),
+                    "project_name": project_name,
+                }
+            )
+            return BootedRelease(
+                release_name=project_name or "openrange",
+                chart_dir=artifacts_dir / "openrange",
+                artifacts_dir=artifacts_dir,
+                containers=ContainerSet(project_name=project_name or "openrange"),
+            )
+
     def fake_run(args, capture_output, text, timeout):
         commands.append(list(args))
-        if args[:2] == ["kubectl", "get"]:
+        if "kubectl" in args and "get" in args:
             return SimpleNamespace(returncode=0, stdout="NAMESPACE NAME\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("open_range.builder.renderer.KindRenderer", FakeRenderer)
+    monkeypatch.setattr("open_range.server.helm_runner.HelmRunner", FakeHelmRunner)
+    monkeypatch.setattr(
+        "open_range.server.helm_runner.resolve_kubectl_cmd",
+        lambda kind_cluster="openrange": ("docker", "exec", f"{kind_cluster}-control-plane", "kubectl"),
+    )
     monkeypatch.setattr("subprocess.run", fake_run)
 
     runner = CliRunner()
@@ -259,7 +285,8 @@ def test_deploy_installs_rendered_chart_on_kind_cluster(
 
     assert result.exit_code == 0, result.output
     assert commands[0][:3] == ["kind", "create", "cluster"]
-    assert commands[1][:2] == ["helm", "install"]
-    assert commands[2][:2] == ["kubectl", "get"]
-    assert "Kind cluster created. Installing Helm chart ..." in result.output
-    assert "Helm chart installed." in result.output
+    assert "kubectl" in commands[1]
+    assert prepared == [str(compose_dir / "openrange")]
+    assert boot_calls[0]["project_name"] == "openrange"
+    assert "Kind cluster created. Preparing images and installing Helm chart ..." in result.output
+    assert "Helm chart installed as release openrange." in result.output

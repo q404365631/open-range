@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from open_range.protocols import ContainerSet
 
 logger = logging.getLogger(__name__)
@@ -206,6 +208,7 @@ class HelmRunner:
             # Older layout: artifacts_dir is already the render output dir
             chart_dir = artifacts_dir
 
+        self.prepare_images(chart_dir)
         self._helm_install(release_name, chart_dir, artifacts_dir)
 
         # Discover pods across namespaces
@@ -243,6 +246,16 @@ class HelmRunner:
         )
         logger.info("Uninstalled Helm release %s", release_name)
 
+    def prepare_images(self, chart_dir: Path) -> None:
+        """Best-effort prewarm chart images into the Kind cluster.
+
+        This avoids long first-boot delays where pods sit in ``ContainerCreating``
+        waiting on large registry pulls. Failures are logged and tolerated so
+        existing cluster-side pulls remain a fallback.
+        """
+        for image in self._chart_images(chart_dir):
+            self._ensure_image_loaded(image)
+
     @staticmethod
     def release_name_for(snapshot_id: str) -> str:
         """Generate a Helm release name from a snapshot ID."""
@@ -277,6 +290,53 @@ class HelmRunner:
             timeout=self.install_timeout_s + 30,
         )
         logger.info("Installed Helm release %s from %s", release_name, chart_dir)
+
+    def _chart_images(self, chart_dir: Path) -> list[str]:
+        values_path = chart_dir / "values.yaml"
+        if not values_path.exists():
+            return []
+        values = yaml.safe_load(values_path.read_text(encoding="utf-8")) or {}
+        services = values.get("services", {})
+        if not isinstance(services, dict):
+            return []
+        images: list[str] = []
+        for raw in services.values():
+            if not isinstance(raw, dict):
+                continue
+            image = str(raw.get("image", "")).strip()
+            if image and image not in images:
+                images.append(image)
+        return images
+
+    def _ensure_image_loaded(self, image: str) -> None:
+        if not image:
+            return
+        if not self._docker_image_present(image):
+            try:
+                self._run(
+                    ["docker", "pull", image],
+                    timeout=max(self.install_timeout_s, 300.0),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to pre-pull image %s: %s", image, exc)
+                return
+        try:
+            self._run(
+                ["kind", "load", "docker-image", image, "--name", self.kind_cluster],
+                timeout=max(self.install_timeout_s, 120.0),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load image %s into Kind cluster %s: %s", image, self.kind_cluster, exc)
+
+    @staticmethod
+    def _docker_image_present(image: str) -> bool:
+        result = subprocess.run(
+            ["docker", "image", "inspect", image],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
 
     def _discover_pods(self, release_name: str) -> dict[str, str]:
         """Discover running pods labelled ``app.kubernetes.io/part-of=openrange``.

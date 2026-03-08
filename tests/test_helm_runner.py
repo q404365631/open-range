@@ -216,8 +216,13 @@ class TestHelmRunner:
             chart = artifacts / "openrange"
             chart.mkdir()
             (chart / "Chart.yaml").write_text("apiVersion: v2\nname: test\n")
+            (chart / "values.yaml").write_text(
+                "services:\n  web:\n    image: nginx:latest\n",
+                encoding="utf-8",
+            )
 
-            with patch.object(runner, "_run") as mock_run, \
+            with patch.object(runner, "prepare_images") as mock_prepare, \
+                 patch.object(runner, "_run") as mock_run, \
                  patch.object(runner, "_discover_pods", return_value={"web": "ns/web-1"}), \
                  patch.object(runner, "_wait_until_healthy"):
                 mock_run.return_value = MagicMock(stdout="", returncode=0)
@@ -228,6 +233,7 @@ class TestHelmRunner:
                 )
 
                 assert release.release_name == HelmRunner.release_name_for("snap1")
+                mock_prepare.assert_called_once_with(chart)
                 mock_run.assert_called_once()
                 call_args = mock_run.call_args[0][0]
                 assert "helm" in call_args
@@ -299,3 +305,43 @@ class TestHelmRunner:
         with patch.object(runner, "_run", return_value=mock_result):
             pods = runner._discover_pods("or-test")
             assert pods == {}
+
+    def test_chart_images_reads_unique_service_images(self):
+        runner = HelmRunner()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            chart = Path(tmpdir)
+            (chart / "values.yaml").write_text(
+                "\n".join(
+                    [
+                        "services:",
+                        "  web:",
+                        "    image: php:8.1-apache",
+                        "  db:",
+                        "    image: mysql:8.0",
+                        "  copy:",
+                        "    image: mysql:8.0",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            assert runner._chart_images(chart) == ["php:8.1-apache", "mysql:8.0"]
+
+    def test_prepare_images_pulls_missing_and_loads_present(self):
+        runner = HelmRunner(kind_cluster="openrange")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            chart = Path(tmpdir)
+            (chart / "values.yaml").write_text(
+                "services:\n  web:\n    image: php:8.1-apache\n  db:\n    image: mysql:8.0\n",
+                encoding="utf-8",
+            )
+            with patch.object(runner, "_docker_image_present", side_effect=[True, False]), \
+                 patch.object(runner, "_run") as mock_run:
+                mock_run.return_value = MagicMock(stdout="", returncode=0)
+                runner.prepare_images(chart)
+
+                calls = [call.args[0] for call in mock_run.call_args_list]
+                assert calls == [
+                    ["kind", "load", "docker-image", "php:8.1-apache", "--name", "openrange"],
+                    ["docker", "pull", "mysql:8.0"],
+                    ["kind", "load", "docker-image", "mysql:8.0", "--name", "openrange"],
+                ]

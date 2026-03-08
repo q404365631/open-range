@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -521,9 +522,8 @@ def deploy(snapshot: str, chart_dir: str | None) -> None:
     Renders the snapshot into a Helm chart, creates a Kind cluster,
     and installs the chart.
     """
-    import subprocess
-
     from open_range.builder.renderer import KindRenderer
+    from open_range.server.helm_runner import HelmRunner, resolve_kubectl_cmd
 
     spec = _load_snapshot(snapshot)
 
@@ -568,33 +568,34 @@ def deploy(snapshot: str, chart_dir: str | None) -> None:
             click.echo(proc.stderr, err=True)
         sys.exit(1)
 
-    click.echo("Kind cluster created. Installing Helm chart ...")
+    click.echo("Kind cluster created. Preparing images and installing Helm chart ...")
+    runner = HelmRunner()
     try:
-        proc = subprocess.run(
-            ["helm", "install", "openrange", str(chart_path)],
-            capture_output=True,
-            text=True,
-            timeout=120,
+        runner.prepare_images(chart_path)
+        project = runner.boot(
+            snapshot_id=spec.lineage.snapshot_id or Path(snapshot).stem or "deploy",
+            artifacts_dir=target,
+            project_name="openrange",
         )
     except FileNotFoundError:
-        click.echo("Error: helm command not found. Install Helm: https://helm.sh/", err=True)
+        click.echo(
+            "Error: helm/kind tooling not found. Install Kind and Helm to deploy locally.",
+            err=True,
+        )
         sys.exit(1)
     except subprocess.TimeoutExpired:
-        click.echo("Error: helm install timed out after 120s.", err=True)
+        click.echo("Error: local deploy timed out during image prep or Helm install.", err=True)
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001
+        click.echo(f"Error: deploy failed: {exc}", err=True)
         sys.exit(1)
 
-    if proc.returncode != 0:
-        click.echo(f"Error: helm install failed (exit {proc.returncode}):", err=True)
-        if proc.stderr:
-            click.echo(proc.stderr, err=True)
-        sys.exit(1)
-
-    click.echo("Helm chart installed.")
+    click.echo(f"Helm chart installed as release {project.release_name}.")
 
     # Show pod status
     try:
         ps = subprocess.run(
-            ["kubectl", "get", "pods", "--all-namespaces", "-l", "app.kubernetes.io/part-of=openrange"],
+            [*resolve_kubectl_cmd(), "get", "pods", "--all-namespaces", "-l", "app.kubernetes.io/part-of=openrange"],
             capture_output=True,
             text=True,
             timeout=30,
