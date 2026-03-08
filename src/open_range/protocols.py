@@ -11,7 +11,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ---------------------------------------------------------------------------
@@ -196,11 +196,10 @@ class CheckResult(BaseModel):
 class ContainerSet(BaseModel):
     """Handle to live Docker containers for a snapshot."""
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     project_name: str = ""
     container_ids: dict[str, str] = Field(default_factory=dict)  # service -> id
-
-    class Config:
-        arbitrary_types_allowed = True
 
     async def exec(self, container: str, cmd: str, timeout: float = 30.0) -> str:
         """Run *cmd* inside *container* and return combined stdout+stderr."""

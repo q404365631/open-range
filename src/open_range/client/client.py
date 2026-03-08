@@ -33,25 +33,21 @@ try:
 
 except ImportError:
     # Stub for development without openenv installed
+    from dataclasses import dataclass
 
+    @dataclass
     class StepResult:  # type: ignore[no-redef]
-        """Minimal StepResult stub."""
+        """Minimal StepResult stub matching openenv.core.client_types."""
 
-        def __init__(
-            self,
-            observation: RangeObservation,
-            reward: float | None = None,
-            done: bool = False,
-        ):
-            self.observation = observation
-            self.reward = reward
-            self.done = done
+        observation: RangeObservation
+        reward: float | None = None
+        done: bool = False
 
     class OpenRangeEnv:  # type: ignore[no-redef]
         """Stub client for development without openenv."""
 
-        def __init__(self, server_url: str = "http://localhost:8000"):
-            self.server_url = server_url
+        def __init__(self, base_url: str = "http://localhost:8000"):
+            self.base_url = base_url
 
         def _step_payload(self, action: RangeAction) -> dict:
             return {"command": action.command, "mode": action.mode}

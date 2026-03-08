@@ -1,3 +1,8 @@
+spec_version: 1
 name: open_range
 version: 0.1.0
-description: "Multi-agent cybersecurity gymnasium"
+type: space
+runtime: fastapi
+app: open_range.server.app:app
+port: 8000
+description: "Multi-agent cybersecurity gymnasium built on OpenEnv"
