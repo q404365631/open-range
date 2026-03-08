@@ -1139,11 +1139,10 @@ class ManagedSnapshotRuntime:
             rng=rng,
         )
         logger.info(
-            "ManagedSnapshotRuntime selected parent %s via %s (score=%.3f components=%s)",
+            "ManagedSnapshotRuntime selected parent %s via %s %s",
             selected.snapshot_id,
             self.mutation_policy.name,
-            score.total,
-            score.components,
+            json.dumps(score.log_payload(), sort_keys=True),
         )
         return selected
 
