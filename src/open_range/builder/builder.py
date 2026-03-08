@@ -275,6 +275,7 @@ class LLMSnapshotBuilder:
                 # validator's path_solvability check can verify reachability.
                 from open_range.builder.manifest_graph import compile_manifest_topology
                 spec.topology = compile_manifest_topology(manifest, spec.topology)
+                spec.golden_path = _fixup_golden_path(spec.golden_path)
                 logger.info(
                     "LLMSnapshotBuilder: build completed (attempt %d/%d, %d vulns, %d golden path steps, %d dep edges)",
                     attempt,
@@ -356,6 +357,81 @@ class SnapshotParseError(Exception):
         if raw_json_snippet:
             parts.append(f"raw_json_start={raw_json_snippet!r}")
         super().__init__(" | ".join(parts))
+
+
+# ---------------------------------------------------------------------------
+# Golden path post-processing
+# ---------------------------------------------------------------------------
+
+
+def _fixup_golden_path(
+    steps: list[GoldenPathStep],
+) -> list[GoldenPathStep]:
+    """Fix common LLM golden path issues.
+
+    - ``%25'`` → ``%27`` (double-encoded percent sign before single quote)
+    - URL-encode spaces in SQL injection payloads within curl URLs
+    - ``| head -n N`` removed from curl commands (truncates useful output)
+    - Bare ``grep`` exit-code failures: wrap grep in ``|| true`` so
+      kubectl exec doesn't report "command terminated with exit code 1"
+    """
+    import re as _re
+
+    fixed: list[GoldenPathStep] = []
+    for step in steps:
+        cmd = step.command
+
+        # Fix double-encoded SQL injection quotes: %25' → %27
+        cmd = cmd.replace("%25'", "%27")
+        cmd = cmd.replace("%25%27", "%27")
+
+        # URL-encode spaces inside curl URL query strings.
+        # LLMs write: curl "http://web/page?q=%27 UNION SELECT ..."
+        # but curl needs: curl "http://web/page?q=%27%20UNION%20SELECT..."
+        cmd = _fixup_curl_url_encoding(cmd)
+
+        # Remove `| head -n N` from curl — it truncates PHP output
+        # and the title may not be in the first N lines
+        cmd = _re.sub(r"\s*\|\s*head\s+-n\s+\d+\s*$", "", cmd)
+
+        # Wrap trailing `| grep ...` in a subshell with `|| true` so
+        # a non-match doesn't cause kubectl exec to report exit code 1
+        if "| grep" in cmd and "|| true" not in cmd:
+            cmd = _re.sub(
+                r"\|\s*(grep\s+.*?)$",
+                r"| \1 || true",
+                cmd,
+            )
+
+        fixed.append(step.model_copy(update={"command": cmd}))
+    return fixed
+
+
+def _fixup_curl_url_encoding(cmd: str) -> str:
+    """URL-encode bare spaces inside curl URL query string parameters.
+
+    LLMs generate: ``curl "http://host/page?q=%27 UNION SELECT ..."``
+    But curl needs: ``curl "http://host/page?q=%27%20UNION%20SELECT..."``
+
+    Only encodes spaces AFTER the ``?`` in a quoted URL argument to curl.
+    """
+    import re as _re
+
+    def _encode_query_spaces(match: re.Match) -> str:  # type: ignore[name-defined]
+        prefix = match.group(1)  # everything up to and including ?
+        query = match.group(2)  # query string with bare spaces
+        quote = match.group(3)  # closing quote
+        # Only encode spaces that are clearly inside SQL/payload, not
+        # the space before a pipe or flag
+        encoded = query.replace(" ", "%20")
+        return f"{prefix}{encoded}{quote}"
+
+    # Match: curl ... "http://...?<query>" where query has spaces
+    return _re.sub(
+        r'((?:https?://)[^\s"]*\?)([^"]*?[A-Z]{2,}[^"]*?)(")',
+        _encode_query_spaces,
+        cmd,
+    )
 
 
 # ---------------------------------------------------------------------------

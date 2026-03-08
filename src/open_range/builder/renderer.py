@@ -665,6 +665,14 @@ CREATE TABLE IF NOT EXISTS secrets (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Ensure the app_user account always exists (LLM PHP code hardcodes it).
+-- The MYSQL_USER env var may create a different user, but app_user must
+-- be available for the web app's DB connection string.
+CREATE USER IF NOT EXISTS 'app_user'@'%' IDENTIFIED BY 'AppUs3r!2024';
+GRANT ALL PRIVILEGES ON referral_db.* TO 'app_user'@'%';
+GRANT SELECT ON flags.* TO 'app_user'@'%';
+FLUSH PRIVILEGES;
+
 USE referral_db;
 """
 
