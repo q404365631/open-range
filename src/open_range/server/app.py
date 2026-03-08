@@ -14,7 +14,7 @@ import json
 import logging
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ValidationError
 
 from open_range.server.console import clear_history, console_router, record_action
@@ -55,13 +55,28 @@ def _try_openenv_app() -> FastAPI | None:
 
 
 # ---------------------------------------------------------------------------
-# Standalone FastAPI fallback
+# Request/Response models matching OpenEnv HTTP protocol
 # ---------------------------------------------------------------------------
 
 
 class ResetRequest(BaseModel):
+    """Matches openenv.core.env_server.types.ResetRequest."""
+
     seed: int | None = None
     episode_id: str | None = None
+
+
+class StepRequest(BaseModel):
+    """Matches openenv.core.env_server.types.StepRequest."""
+
+    action: dict[str, Any]
+    timeout_s: float | None = None
+    request_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Standalone FastAPI fallback
+# ---------------------------------------------------------------------------
 
 
 def _create_standalone_app() -> FastAPI:
@@ -78,7 +93,7 @@ def _create_standalone_app() -> FastAPI:
     WS   /ws        -- persistent WebSocket session (JSON messages)
     """
 
-    app = FastAPI(
+    fastapi_app = FastAPI(
         title="OpenRange",
         description="Multi-agent cybersecurity gymnasium",
         version=_APP_VERSION,
@@ -89,20 +104,20 @@ def _create_standalone_app() -> FastAPI:
     env = RangeEnvironment()
 
     # Store env on app.state so the console router can access it
-    app.state.env = env
+    fastapi_app.state.env = env
 
     # Include the operator console router
-    app.include_router(console_router)
+    fastapi_app.include_router(console_router)
 
     # ---------------------------------------------------------------
-    # HTTP endpoints
+    # HTTP endpoints (matches OpenEnv HTTPEnvServer contract)
     # ---------------------------------------------------------------
 
-    @app.get("/health")
+    @fastapi_app.get("/health")
     async def health() -> dict[str, str]:
-        return {"status": "ok"}
+        return {"status": "healthy"}
 
-    @app.get("/metadata")
+    @fastapi_app.get("/metadata")
     async def metadata() -> dict[str, Any]:
         return {
             "name": "open_range",
@@ -111,7 +126,7 @@ def _create_standalone_app() -> FastAPI:
             "supports_concurrent_sessions": False,
         }
 
-    @app.get("/schema")
+    @fastapi_app.get("/schema")
     async def schema() -> dict[str, Any]:
         return {
             "action": RangeAction.model_json_schema(),
@@ -119,18 +134,30 @@ def _create_standalone_app() -> FastAPI:
             "state": RangeState.model_json_schema(),
         }
 
-    @app.post("/reset")
+    @fastapi_app.post("/reset")
     async def reset(req: ResetRequest | None = None) -> dict[str, Any]:
         req = req or ResetRequest()
         clear_history()
         obs = env.reset(seed=req.seed, episode_id=req.episode_id)
-        return {"observation": obs.model_dump()}
+        return {
+            "observation": obs.model_dump(),
+            "reward": obs.reward,
+            "done": obs.done,
+        }
 
-    @app.post("/step")
-    async def step(action: RangeAction) -> dict[str, Any]:
+    @fastapi_app.post("/step")
+    async def step(request: Request) -> dict[str, Any]:
         import time as _time
 
-        obs = env.step(action)
+        body = await request.json()
+        # Accept both StepRequest {"action": {...}} and direct RangeAction {"command": ..., "mode": ...}
+        if "action" in body:
+            action = RangeAction(**body["action"])
+            timeout_s = body.get("timeout_s")
+        else:
+            action = RangeAction(**body)
+            timeout_s = None
+        obs = env.step(action, timeout_s=timeout_s)
         record_action({
             "step": env.state.step_count,
             "command": action.command,
@@ -143,27 +170,30 @@ def _create_standalone_app() -> FastAPI:
             "done": obs.done,
         }
 
-    @app.get("/state")
+    @fastapi_app.get("/state")
     async def get_state() -> dict[str, Any]:
         return env.state.model_dump()
 
     # ---------------------------------------------------------------
-    # WebSocket endpoint
+    # WebSocket endpoint (matches OpenEnv WebSocket protocol)
     # ---------------------------------------------------------------
 
-    @app.websocket("/ws")
+    @fastapi_app.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:
         """Persistent WebSocket session with per-connection environment.
 
-        Clients send JSON messages with a ``type`` field:
+        Message protocol (matches OpenEnv WebSocket contract):
 
-        * ``{"type": "reset"}``                        -- reset the environment
-        * ``{"type": "reset", "seed": 42, "episode_id": "ep1"}``
-        * ``{"type": "step", "command": "...", "mode": "red"}``
-        * ``{"type": "state"}``                        -- get current state
+        Client sends:
+          {"type": "reset", "data": {"seed": 42, "episode_id": "ep1"}}
+          {"type": "step", "data": {"command": "...", "mode": "red"}}
+          {"type": "state"}
+          {"type": "close"}
 
-        The server responds with JSON containing at minimum a ``type``
-        field (``"observation"``, ``"state"``, or ``"error"``).
+        Server responds:
+          {"type": "observation", "data": {...}}
+          {"type": "state", "data": {...}}
+          {"type": "error", "data": {"message": "...", "code": "..."}}
         """
         await websocket.accept()
 
@@ -176,59 +206,67 @@ def _create_standalone_app() -> FastAPI:
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
-                    await websocket.send_json(
-                        {"type": "error", "detail": "Invalid JSON"}
-                    )
+                    await websocket.send_json({
+                        "type": "error",
+                        "data": {"message": "Invalid JSON", "code": "parse_error"},
+                    })
                     continue
 
                 msg_type = msg.get("type", "")
+                msg_data = msg.get("data", {})
 
                 if msg_type == "reset":
-                    seed = msg.get("seed")
-                    episode_id = msg.get("episode_id")
+                    seed = msg_data.get("seed") if msg_data else msg.get("seed")
+                    episode_id = msg_data.get("episode_id") if msg_data else msg.get("episode_id")
                     obs = ws_env.reset(seed=seed, episode_id=episode_id)
                     await websocket.send_json({
                         "type": "observation",
-                        "observation": obs.model_dump(),
+                        "data": obs.model_dump(),
                     })
 
                 elif msg_type == "step":
                     try:
                         action = RangeAction(
-                            command=msg.get("command", ""),
-                            mode=msg.get("mode", "red"),
+                            command=msg_data.get("command", msg.get("command", "")),
+                            mode=msg_data.get("mode", msg.get("mode", "red")),
                         )
                     except ValidationError as ve:
                         await websocket.send_json({
                             "type": "error",
-                            "detail": str(ve),
+                            "data": {"message": str(ve), "code": "validation_error"},
                         })
                         continue
 
                     obs = ws_env.step(action)
                     await websocket.send_json({
                         "type": "observation",
-                        "observation": obs.model_dump(),
-                        "reward": obs.reward,
-                        "done": obs.done,
+                        "data": obs.model_dump(),
                     })
 
                 elif msg_type == "state":
                     await websocket.send_json({
                         "type": "state",
-                        "state": ws_env.state.model_dump(),
+                        "data": ws_env.state.model_dump(),
                     })
+
+                elif msg_type == "close":
+                    await websocket.close()
+                    break
 
                 else:
                     await websocket.send_json({
                         "type": "error",
-                        "detail": f"Unknown message type: {msg_type!r}",
+                        "data": {
+                            "message": f"Unknown message type: {msg_type!r}",
+                            "code": "unknown_type",
+                        },
                     })
 
         except WebSocketDisconnect:
+            ws_env.close()
             logger.debug("WebSocket client disconnected")
 
-    return app
+    return fastapi_app
 
 
 # ---------------------------------------------------------------------------
@@ -248,3 +286,10 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+
+
+def main() -> None:
+    """Entry point for ``uv run server`` or ``python -m open_range.server``."""
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)

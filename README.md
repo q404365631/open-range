@@ -1,3 +1,9 @@
+---
+title: OpenRange
+sdk: docker
+app_port: 8000
+---
+
 # OpenRange
 
 A multi-agent cybersecurity gymnasium on [OpenEnv](https://github.com/meta-pytorch/OpenEnv). Red and Blue agents train on validated enterprise networks that mutate between episodes.

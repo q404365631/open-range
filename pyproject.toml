@@ -5,13 +5,14 @@ description = "Multi-agent cybersecurity gymnasium built on OpenEnv"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
-    "fastapi>=0.110",
+    "openenv-core[core]>=0.2.1",
+    "fastapi>=0.115",
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "docker>=7.0",
     "jinja2>=3.1",
     "litellm>=1.30",
-    "uvicorn>=0.27",
+    "uvicorn>=0.24",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +25,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/open_range"]
+
+[project.scripts]
+server = "open_range.server.app:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

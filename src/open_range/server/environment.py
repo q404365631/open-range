@@ -74,6 +74,17 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
 
     SUPPORTS_CONCURRENT_SESSIONS = False
 
+    def get_metadata(self) -> dict[str, Any]:
+        """Return environment metadata for /metadata endpoint.
+
+        Matches OpenEnv's EnvironmentMetadata schema.
+        """
+        return {
+            "name": "open_range",
+            "version": "0.1.0",
+            "description": "Multi-agent cybersecurity gymnasium built on OpenEnv",
+        }
+
     def __init__(
         self,
         max_steps: int = DEFAULT_MAX_STEPS,
@@ -710,3 +721,12 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
     def npc_traffic_log(self) -> list[dict[str, Any]]:
         """NPC traffic log for this episode (labeled for FP scoring)."""
         return list(self._npc_traffic_log)
+
+    def close(self) -> None:
+        """Release resources (Docker client, episode state)."""
+        if self._docker_client is not None:
+            try:
+                self._docker_client.close()
+            except Exception:
+                pass
+            self._docker_client = None

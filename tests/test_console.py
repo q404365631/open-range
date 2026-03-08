@@ -13,8 +13,10 @@ from open_range.server.app import create_app
 
 
 @pytest.fixture()
-def client():
-    """Create a TestClient against a fresh app instance."""
+def client(monkeypatch):
+    """Create a TestClient against the standalone FastAPI app (not OpenEnv)."""
+    # Force standalone path so we test our own endpoints and console integration
+    monkeypatch.setattr("open_range.server.app._try_openenv_app", lambda: None)
     app = create_app()
     return TestClient(app)
 
