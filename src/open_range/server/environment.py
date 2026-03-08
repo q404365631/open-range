@@ -640,7 +640,7 @@ class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
             else svc.start_command
         )
 
-        # Run init commands (isolated from PID 1's process group)
+        # Run init commands synchronously (blocking, no session isolation needed)
         for cmd in init_commands:
             try:
                 result = sp.run(
@@ -650,7 +650,6 @@ class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
                     text=True,
                     env=env,
                     check=False,
-                    start_new_session=True,
                 )
                 if result.returncode != 0 and result.stderr:
                     logger.debug(
@@ -660,29 +659,36 @@ class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
             except Exception as exc:
                 logger.warning("Init command failed for %s: %s", svc.daemon, exc)
 
-        # Start the daemon in a new session so it cannot send signals to
-        # PID 1 (uvicorn).  Ensure the command is backgrounded.
+        # Start the daemon using Popen with DEVNULL file descriptors.
+        # Using sp.run() with capture_output=True creates pipes that race
+        # with the SIGCHLD zombie reaper (waitpid(-1) steals children from
+        # sp.run's internal waitpid).  Popen + DEVNULL avoids all pipe/signal
+        # issues — the daemon's own start_command redirects to its log file.
         effective_cmd = start_command
         if not effective_cmd.rstrip().endswith("&"):
             effective_cmd = f"({effective_cmd}) &"
         try:
-            result = sp.run(
+            proc = sp.Popen(
                 ["bash", "-c", effective_cmd],
-                capture_output=True,
-                timeout=30,
-                text=True,
+                stdin=sp.DEVNULL,
+                stdout=sp.DEVNULL,
+                stderr=sp.DEVNULL,
                 env=env,
-                check=False,
                 start_new_session=True,
             )
-            if result.returncode != 0 and result.stderr:
-                logger.debug(
-                    "Start cmd stderr for %s: %s",
-                    svc.daemon, result.stderr[:200],
-                )
+            # Wait for bash to exit (it backgrounds the daemon and exits
+            # immediately).  The zombie reaper handles cleanup if we lose
+            # the race.
+            try:
+                proc.wait(timeout=5)
+            except (sp.TimeoutExpired, ChildProcessError):
+                pass
         except Exception as exc:
             logger.warning("Start command failed for %s: %s", svc.daemon, exc)
             return
+
+        # Brief pause to let the daemon initialize before probing readiness
+        time.sleep(0.3)
 
         # Wait for readiness
         self._wait_for_readiness(svc)
@@ -909,7 +915,9 @@ class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
         Priority:
         1. Explicit snapshot passed via kwargs["snapshot"]
         2. Snapshot loaded from store via kwargs["snapshot_id"]
-        3. A minimal fallback (for testing without Docker)
+        3. Acquired from the managed runtime snapshot pool
+
+        Raises RuntimeError if no snapshot source is available.
         """
         if "snapshot" in kwargs and isinstance(kwargs["snapshot"], SnapshotSpec):
             self._snapshot_id = kwargs.get("snapshot_id")
@@ -922,15 +930,10 @@ class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
             self._snapshot_id = admitted.snapshot_id
             snap = admitted.snapshot
         else:
-            self._snapshot_id = None
-            snap = SnapshotSpec(
-                topology={"hosts": ["attacker", "siem"]},
-                flags=[],
-                golden_path=[],
-                task={
-                    "red_briefing": "Test mode.",
-                    "blue_briefing": "Test mode.",
-                },
+            raise RuntimeError(
+                "No snapshot source available. Provide a snapshot via "
+                "kwargs['snapshot'], set OPENRANGE_RUNTIME_MANIFEST to enable "
+                "the managed runtime, or pass a runtime to the constructor."
             )
 
         # Defensive: ensure required fields are not None
