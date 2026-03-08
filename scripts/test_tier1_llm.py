@@ -222,7 +222,7 @@ async def main():
         print("Set AZURE_API_KEY and AZURE_API_BASE before running.")
         sys.exit(1)
 
-    # Default to azure/gpt-5.2 if not overridden
+    # Default to azure/gpt-5.2-codex if not overridden
     if not os.environ.get("OPENRANGE_BUILDER_MODEL"):
         os.environ["OPENRANGE_BUILDER_MODEL"] = "azure/gpt-5.2-codex"
 

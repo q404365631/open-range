@@ -32,9 +32,14 @@ _TEMPLATE_MAP: dict[str, str] = {
 
 
 class SnapshotRenderer:
-    """Render Jinja2 templates from a SnapshotSpec to an output directory."""
+    """Render Jinja2 templates from a SnapshotSpec to an output directory.
+
+    Uses the templates in the ``templates/`` directory adjacent to this module
+    to produce all Docker artifacts needed to boot a range.
+    """
 
     def __init__(self, template_dir: Path | None = None) -> None:
+        """Initialize with an optional custom template directory."""
         self.template_dir = template_dir or _TEMPLATE_DIR
         self.env = jinja2.Environment(
             loader=jinja2.FileSystemLoader(str(self.template_dir)),
@@ -51,6 +56,11 @@ class SnapshotRenderer:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         context = _build_context(spec)
+        logger.info(
+            "SnapshotRenderer: rendering %d templates to %s",
+            len(_TEMPLATE_MAP),
+            output_dir,
+        )
 
         for template_name, output_name in _TEMPLATE_MAP.items():
             template = self.env.get_template(template_name)
@@ -59,6 +69,7 @@ class SnapshotRenderer:
             dest.write_text(rendered)
             logger.info("Rendered %s -> %s", template_name, dest)
 
+        logger.info("SnapshotRenderer: rendering complete (%d files)", len(_TEMPLATE_MAP))
         return output_dir
 
 
@@ -109,6 +120,14 @@ def _build_context(spec: SnapshotSpec) -> dict[str, Any]:
     has_download = (
         any("download" in ip or "file=" in ip for ip in vuln_injection_points)
         or "path_traversal" in vuln_types
+    )
+
+    logger.debug(
+        "_build_context: %d hosts, %d networks, search=%s, download=%s",
+        len(hosts),
+        len(networks),
+        has_search,
+        has_download,
     )
 
     context: dict[str, Any] = {

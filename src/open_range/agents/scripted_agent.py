@@ -6,7 +6,7 @@ Useful for integration tests, golden-path verification, and hackathon demos.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 
 class ScriptedAgent:
@@ -33,7 +33,7 @@ class ScriptedAgent:
         self._step_idx = 0
         self.role = role
 
-    def act(self, observation: str) -> str:
+    def act(self, observation: Any) -> str:
         """Return the next scripted command."""
         if self._step_idx < len(self.commands):
             cmd = self.commands[self._step_idx]

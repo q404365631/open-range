@@ -9,7 +9,7 @@ no base class required.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -31,11 +31,12 @@ class RangeAgent(Protocol):
         """
         ...
 
-    def act(self, observation: str) -> str:
+    def act(self, observation: Any) -> str:
         """Given an observation, return the next command to execute.
 
         Args:
-            observation: stdout from the previous step, or initial briefing.
+            observation: The previous observation object, or a plain string for
+                simpler agents.
 
         Returns:
             Shell command string (e.g., ``"nmap -sV 10.0.1.0/24"``).

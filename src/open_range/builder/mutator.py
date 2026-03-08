@@ -2,7 +2,8 @@
 
 The Mutator wraps a SnapshotBuilder and adds mutation-specific context:
 ensuring vuln diversity, targeting weak areas, and feeding back error
-context from failed validations.
+context from failed validations. Each call to ``mutate()`` produces a
+snapshot with different vulnerabilities than recent episodes.
 """
 
 from __future__ import annotations
@@ -59,6 +60,12 @@ class Mutator:
         builder: SnapshotBuilder,
         max_retries: int = 3,
     ) -> None:
+        """Initialize the mutator with a builder and retry limit.
+
+        Args:
+            builder: Any SnapshotBuilder implementation.
+            max_retries: Maximum build attempts (passed through to builder).
+        """
         self.builder = builder
         self.max_retries = max_retries
         self._history: list[str] = []  # recent vuln classes
@@ -94,7 +101,18 @@ class Mutator:
         context.recent_attack_surfaces = list(self._attack_surfaces[-5:])
         context.episode_count = self._episode_count
 
+        logger.debug(
+            "Mutator: preparing mutation for episode %d (avoiding vulns: %s, surfaces: %s)",
+            self._episode_count + 1,
+            context.previous_vuln_classes,
+            context.recent_attack_surfaces,
+        )
+
         if error is not None:
+            logger.warning(
+                "Mutator: retrying with error feedback: %s",
+                list(error.keys()) if isinstance(error, dict) else error,
+            )
             # error field may or may not exist on BuildContext
             try:
                 context.error = error  # type: ignore[attr-defined]
@@ -120,16 +138,17 @@ class Mutator:
         self._episode_count += 1
 
         logger.info(
-            "Mutator: episode %d, vuln classes: %s",
+            "Mutator: episode %d complete, vuln classes: %s, total history: %d entries",
             self._episode_count,
             new_classes,
+            len(self._history),
         )
 
         return snapshot
 
     @property
     def episode_count(self) -> int:
-        """Number of episodes (mutations) so far."""
+        """Number of episodes (mutations) completed so far."""
         return self._episode_count
 
     @property

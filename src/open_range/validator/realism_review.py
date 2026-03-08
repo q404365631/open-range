@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from typing import Any
 
 from open_range.builder.prompts import REALISM_REVIEW_PROMPT
 from open_range.protocols import CheckResult, ContainerSet, SnapshotSpec
@@ -26,7 +27,7 @@ class RealismReviewCheck:
     def __init__(self, model: str | None = None) -> None:
         self.model = model or os.environ.get(
             "OPENRANGE_VALIDATOR_MODEL",
-            "anthropic/claude-haiku-4-5-20251001",
+            "azure/gpt-5.2-codex",
         )
 
     async def check(self, snapshot: SnapshotSpec, containers: ContainerSet) -> CheckResult:
@@ -56,15 +57,18 @@ class RealismReviewCheck:
         }
 
         try:
-            response = await litellm.acompletion(
-                model=self.model,
-                messages=[
+            kwargs: dict[str, Any] = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": REALISM_REVIEW_PROMPT},
                     {"role": "user", "content": json.dumps(summary)},
                 ],
-                response_format={"type": "json_object"},
-                temperature=0.0,
-            )
+                "response_format": {"type": "json_object"},
+            }
+            # Codex models don't support temperature
+            if "codex" not in self.model.lower():
+                kwargs["temperature"] = 0.0
+            response = await litellm.acompletion(**kwargs)
             review = json.loads(response.choices[0].message.content)
             passed = bool(review.get("pass", False))
             issues = review.get("issues", [])

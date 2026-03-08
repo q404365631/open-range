@@ -1,3 +1,14 @@
+# =============================================================================
+# OpenRange — Production All-in-One Dockerfile
+# =============================================================================
+# Multi-stage build:
+#   Stage 1 (builder): OpenEnv base image, install Python deps via uv sync
+#   Stage 2 (runtime): Ubuntu 22.04 with all range services + Python env
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Stage 1: Builder — install Python dependencies using the OpenEnv base image
+# ---------------------------------------------------------------------------
 ARG BASE_IMAGE=ghcr.io/meta-pytorch/openenv-base:latest
 FROM ${BASE_IMAGE} AS builder
 
@@ -25,18 +36,78 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uv sync --no-editable; \
     fi
 
-# Runtime stage
-FROM ${BASE_IMAGE}
+# ---------------------------------------------------------------------------
+# Stage 2: Runtime — Ubuntu 22.04 with all range services
+# ---------------------------------------------------------------------------
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install ALL service packages in one RUN layer
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Web
+    nginx \
+    php8.1-fpm \
+    php8.1-mysql \
+    php8.1-ldap \
+    php8.1-xml \
+    php8.1-mbstring \
+    # Database
+    mysql-server \
+    # LDAP
+    slapd \
+    ldap-utils \
+    # Logging
+    rsyslog \
+    # File sharing
+    samba \
+    # Mail
+    postfix \
+    # SSH
+    openssh-server \
+    # Security tools
+    nmap \
+    sqlmap \
+    hydra \
+    nikto \
+    netcat-openbsd \
+    dnsutils \
+    tcpdump \
+    curl \
+    wget \
+    sshpass \
+    iputils-ping \
+    whois \
+    # Python
+    python3 \
+    python3-pip \
+    # Utilities
+    jq \
+    procps \
+    iproute2 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
+# Copy the Python virtual environment from builder
 COPY --from=builder /app/env/.venv /app/.venv
+
+# Copy the application code from builder
 COPY --from=builder /app/env /app/env
 
+# Copy start.sh
+COPY start.sh /app/env/start.sh
+RUN chmod +x /app/env/start.sh
+
+# Environment configuration
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app/env/src:/app/env:$PYTHONPATH"
+ENV OPENRANGE_EXECUTION_MODE=subprocess
 
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+# Health check — services need time to boot
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
-CMD ["sh", "-c", "cd /app/env && uvicorn server.app:app --host 0.0.0.0 --port 8000"]
+EXPOSE 8000
+
+CMD ["bash", "/app/env/start.sh"]

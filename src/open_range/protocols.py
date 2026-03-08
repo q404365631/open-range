@@ -11,7 +11,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 # ---------------------------------------------------------------------------
@@ -97,9 +97,11 @@ class Vulnerability(BaseModel):
 class ExploitStep(BaseModel):
     """Single step in an exploit chain."""
 
-    vuln_id: str
-    command: str
-    description: str = ""
+    model_config = ConfigDict(populate_by_name=True)
+
+    vuln_id: str = Field(validation_alias=AliasChoices("vuln_id", "vuln"))
+    command: str = Field(validation_alias=AliasChoices("command", "action"))
+    description: str = Field(default="", validation_alias=AliasChoices("description", "yields"))
 
 
 class TruthGraph(BaseModel):
@@ -112,9 +114,14 @@ class TruthGraph(BaseModel):
 class GoldenPathStep(BaseModel):
     """Single step in the golden path walkthrough."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     step: int
-    command: str
-    expect_in_stdout: str = ""
+    command: str = Field(validation_alias=AliasChoices("command", "cmd"))
+    expect_in_stdout: str = Field(
+        default="",
+        validation_alias=AliasChoices("expect_in_stdout", "expect_stdout"),
+    )
     host: str = "attacker"
     description: str = ""
 
@@ -279,6 +286,21 @@ class ContainerSet(BaseModel):
             stderr=asyncio.subprocess.PIPE,
         )
         await proc.communicate()
+
+    async def restart(self, container: str, timeout: float = 30.0) -> None:
+        """Restart *container* via ``docker restart``, restoring pre-patched state."""
+        import asyncio
+
+        cid = self.container_ids.get(container, container)
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "restart", cid,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
 
 
 # ---------------------------------------------------------------------------

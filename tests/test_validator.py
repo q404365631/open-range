@@ -172,6 +172,215 @@ async def test_patchability_fails_when_no_vulns(mock_containers):
     assert result.passed is False
 
 
+@pytest.mark.asyncio
+async def test_patchability_passes_when_patch_breaks_exploit(mock_containers):
+    """Patch applied -> golden path step no longer produces expected output -> PASS."""
+    from open_range.protocols import ExploitStep
+    from open_range.validator.patchability import PatchabilityCheck
+
+    spec = SnapshotSpec(
+        truth_graph=TruthGraph(
+            vulns=[
+                Vulnerability(
+                    id="v1",
+                    type="sqli",
+                    host="web",
+                    remediation="sed -i 's/unsafe/safe/' /var/www/app.php",
+                ),
+            ],
+            exploit_chain=[
+                ExploitStep(vuln_id="v1", command="curl http://web/search?q=exploit"),
+            ],
+        ),
+        golden_path=[
+            GoldenPathStep(
+                step=1,
+                command="curl http://web/search?q=exploit",
+                expect_in_stdout="SECRET_DATA",
+            ),
+        ],
+    )
+
+    # Remediation exec succeeds (returns empty)
+    mock_containers.exec_results[("web", "sed")] = ""
+    # After patch, golden path step returns DIFFERENT output (no SECRET_DATA)
+    mock_containers.exec_results[("attacker", "curl http://web/search?q=exploit")] = "no results"
+
+    result = await PatchabilityCheck().check(spec, mock_containers)
+    assert result.passed is True
+    assert result.name == "patchability"
+
+
+@pytest.mark.asyncio
+async def test_patchability_fails_when_exploit_still_works(mock_containers):
+    """Patch applied but golden path step still succeeds -> FAIL."""
+    from open_range.protocols import ExploitStep
+    from open_range.validator.patchability import PatchabilityCheck
+
+    spec = SnapshotSpec(
+        truth_graph=TruthGraph(
+            vulns=[
+                Vulnerability(
+                    id="v1",
+                    type="sqli",
+                    host="web",
+                    remediation="sed -i 's/unsafe/safe/' /var/www/app.php",
+                ),
+            ],
+            exploit_chain=[
+                ExploitStep(vuln_id="v1", command="curl http://web/search?q=exploit"),
+            ],
+        ),
+        golden_path=[
+            GoldenPathStep(
+                step=1,
+                command="curl http://web/search?q=exploit",
+                expect_in_stdout="SECRET_DATA",
+            ),
+        ],
+    )
+
+    # Remediation exec succeeds
+    mock_containers.exec_results[("web", "sed")] = ""
+    # After patch, golden path step STILL returns the expected output (patch didn't work)
+    mock_containers.exec_results[("attacker", "curl http://web/search?q=exploit")] = "SECRET_DATA"
+
+    result = await PatchabilityCheck().check(spec, mock_containers)
+    assert result.passed is False
+    assert "exploitable after remediation" in result.error
+
+
+@pytest.mark.asyncio
+async def test_patchability_skips_prose_remediation(mock_containers):
+    """Non-executable remediation (prose) is skipped with warning, fails if all skipped."""
+    from open_range.protocols import ExploitStep
+    from open_range.validator.patchability import PatchabilityCheck
+
+    spec = SnapshotSpec(
+        truth_graph=TruthGraph(
+            vulns=[
+                Vulnerability(
+                    id="v1",
+                    type="sqli",
+                    host="web",
+                    remediation="Use parameterized queries instead of string concatenation",
+                ),
+            ],
+            exploit_chain=[
+                ExploitStep(vuln_id="v1", command="curl http://web/search?q=exploit"),
+            ],
+        ),
+        golden_path=[
+            GoldenPathStep(
+                step=1,
+                command="curl http://web/search?q=exploit",
+                expect_in_stdout="SECRET_DATA",
+            ),
+        ],
+    )
+
+    result = await PatchabilityCheck().check(spec, mock_containers)
+    assert result.passed is False
+    assert "no vulns had testable remediation" in result.error
+    # Verify it was recorded as skipped
+    vuln_results = result.details["vuln_results"]
+    assert len(vuln_results) == 1
+    assert "skipped" in vuln_results[0]
+    assert "not executable" in vuln_results[0]["skipped"]
+
+
+@pytest.mark.asyncio
+async def test_patchability_fails_when_all_skipped(mock_containers):
+    """If all vulns are skipped (no testable remediation), check FAILS."""
+    from open_range.protocols import ExploitStep
+    from open_range.validator.patchability import PatchabilityCheck
+
+    spec = SnapshotSpec(
+        truth_graph=TruthGraph(
+            vulns=[
+                Vulnerability(
+                    id="v1",
+                    type="sqli",
+                    host="web",
+                    remediation="",  # empty remediation
+                ),
+                Vulnerability(
+                    id="v2",
+                    type="xss",
+                    host="web",
+                    remediation="Sanitize all user input before rendering",  # prose
+                ),
+            ],
+            exploit_chain=[
+                ExploitStep(vuln_id="v1", command="cmd1"),
+                ExploitStep(vuln_id="v2", command="cmd2"),
+            ],
+        ),
+        golden_path=[
+            GoldenPathStep(step=1, command="cmd1", expect_in_stdout="found"),
+            GoldenPathStep(step=2, command="cmd2", expect_in_stdout="xss"),
+        ],
+    )
+
+    result = await PatchabilityCheck().check(spec, mock_containers)
+    assert result.passed is False
+    assert "no vulns had testable remediation" in result.error
+
+
+@pytest.mark.asyncio
+async def test_patchability_restarts_container_after_patch(mock_containers):
+    """Container is restarted after each vuln's test to restore pre-patched state."""
+    from open_range.protocols import ExploitStep
+    from open_range.validator.patchability import PatchabilityCheck
+
+    spec = SnapshotSpec(
+        truth_graph=TruthGraph(
+            vulns=[
+                Vulnerability(
+                    id="v1",
+                    type="sqli",
+                    host="web",
+                    remediation="sed -i 's/bad/good/' /app.php",
+                ),
+                Vulnerability(
+                    id="v2",
+                    type="lfi",
+                    host="web",
+                    remediation="rm /etc/sensitive_file",
+                ),
+            ],
+            exploit_chain=[
+                ExploitStep(vuln_id="v1", command="curl http://web/search?q=inject"),
+                ExploitStep(vuln_id="v2", command="curl http://web/read?file=../../etc/passwd"),
+            ],
+        ),
+        golden_path=[
+            GoldenPathStep(
+                step=1,
+                command="curl http://web/search?q=inject",
+                expect_in_stdout="SQLI_RESULT",
+            ),
+            GoldenPathStep(
+                step=2,
+                command="curl http://web/read?file=../../etc/passwd",
+                expect_in_stdout="root:x:0",
+            ),
+        ],
+    )
+
+    # Remediation succeeds for both
+    mock_containers.exec_results[("web", "sed")] = ""
+    mock_containers.exec_results[("web", "rm")] = ""
+    # After patch, exploits fail (return empty)
+    mock_containers.exec_results[("attacker", "curl http://web/search")] = "blocked"
+    mock_containers.exec_results[("attacker", "curl http://web/read")] = "forbidden"
+
+    result = await PatchabilityCheck().check(spec, mock_containers)
+    assert result.passed is True
+    # Container should have been restarted once per tested vuln
+    assert mock_containers.restarted == ["web", "web"]
+
+
 # ---------------------------------------------------------------------------
 # Check 4: Evidence
 # ---------------------------------------------------------------------------
@@ -239,6 +448,49 @@ async def test_reward_grounding_no_flags(mock_containers):
     assert result.passed is False
 
 
+@pytest.mark.asyncio
+async def test_reward_grounding_verifies_db_flag(mock_containers):
+    """DB-stored flag verified via MySQL query — value found."""
+    from open_range.validator.reward_grounding import RewardGroundingCheck
+
+    spec = SnapshotSpec(
+        flags=[FlagSpec(id="f1", value="FLAG{db_flag}", path="db:flags.secrets.flag", host="db")]
+    )
+    mock_containers.exec_results[("db", "mysql")] = "FLAG{db_flag}"
+    result = await RewardGroundingCheck().check(spec, mock_containers)
+    assert result.passed is True
+
+
+@pytest.mark.asyncio
+async def test_reward_grounding_fails_db_flag_not_found(mock_containers):
+    """DB-stored flag verified via MySQL query — wrong value returned."""
+    from open_range.validator.reward_grounding import RewardGroundingCheck
+
+    spec = SnapshotSpec(
+        flags=[FlagSpec(id="f1", value="FLAG{db_flag}", path="db:flags.secrets.flag", host="db")]
+    )
+    mock_containers.exec_results[("db", "mysql")] = "FLAG{wrong_value}"
+    result = await RewardGroundingCheck().check(spec, mock_containers)
+    assert result.passed is False
+    assert "1 flag(s)" in result.error
+
+
+@pytest.mark.asyncio
+async def test_reward_grounding_skips_db_sql_path(mock_containers):
+    """db:sql deployment artifacts are skipped, not treated as flag locations."""
+    from open_range.validator.reward_grounding import RewardGroundingCheck
+
+    spec = SnapshotSpec(
+        flags=[
+            FlagSpec(id="f1", value="FLAG{abc}", path="/var/flags/f.txt", host="web"),
+            FlagSpec(id="f2", value="FLAG{deploy}", path="db:sql", host="db"),
+        ]
+    )
+    mock_containers.exec_results[("web", "cat")] = "FLAG{abc}"
+    result = await RewardGroundingCheck().check(spec, mock_containers)
+    assert result.passed is True
+
+
 # ---------------------------------------------------------------------------
 # Check 6: Isolation
 # ---------------------------------------------------------------------------
@@ -277,6 +529,56 @@ async def test_isolation_fails_when_flag_in_briefing(mock_containers):
     result = await IsolationCheck().check(spec, mock_containers)
     assert result.passed is False
     assert "flag value leaked" in result.error
+
+
+@pytest.mark.asyncio
+async def test_isolation_checks_multiple_ports(mock_containers):
+    """Zone isolation probes multiple ports — all CLOSED means pass."""
+    from open_range.validator.isolation import IsolationCheck
+
+    spec = SnapshotSpec(
+        topology={
+            "hosts": ["attacker", "db"],
+            "zones": {"internal": ["db"]},
+        },
+        flags=[],
+        golden_path=[],
+        task=TaskSpec(red_briefing="Go.", blue_briefing="Watch."),
+    )
+    # All probes return CLOSED
+    mock_containers.exec_results[("attacker", "/dev/tcp/")] = "CLOSED"
+    result = await IsolationCheck().check(spec, mock_containers)
+    assert result.passed is True
+
+
+@pytest.mark.asyncio
+async def test_isolation_fails_on_non_ssh_port(mock_containers):
+    """Zone isolation detects reachability on a non-SSH port (e.g. 3306)."""
+    from open_range.validator.isolation import IsolationCheck
+
+    spec = SnapshotSpec(
+        topology={
+            "hosts": ["attacker", "db"],
+            "zones": {"internal": ["db"]},
+        },
+        flags=[],
+        golden_path=[],
+        task=TaskSpec(red_briefing="Go.", blue_briefing="Watch."),
+    )
+
+    # Only port 3306 is OPEN; everything else CLOSED.
+    async def exec_side_effect(container, cmd, **kwargs):
+        if container == "attacker" and "/dev/tcp/" in cmd:
+            if "/3306'" in cmd or "/3306}" in cmd:
+                return "OPEN"
+            return "CLOSED"
+        return ""
+
+    mock_containers.exec = exec_side_effect
+    result = await IsolationCheck().check(spec, mock_containers)
+    assert result.passed is False
+    assert "3306" in result.error
+    assert "db" in result.error
 
 
 # ---------------------------------------------------------------------------

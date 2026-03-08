@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from open_range.agents.observation import format_observation
 from open_range.agents.parsing import extract_command
 from open_range.agents.prompts import BLUE_SYSTEM_PROMPT, RED_SYSTEM_PROMPT
 
@@ -51,7 +52,7 @@ class LLMRangeAgent:
             {"role": "user", "content": briefing},
         ]
 
-    def act(self, observation: str) -> str:
+    def act(self, observation: Any) -> str:
         """Call the LLM with the conversation history and return a command.
 
         Appends the observation as a user message (unless it was already
@@ -60,9 +61,11 @@ class LLMRangeAgent:
         """
         import litellm
 
+        observation_text = format_observation(observation)
+
         # Append observation only if it wasn't already the last user message
         if self.messages and self.messages[-1]["role"] != "user":
-            self.messages.append({"role": "user", "content": observation})
+            self.messages.append({"role": "user", "content": observation_text})
 
         response = litellm.completion(
             model=self.model,

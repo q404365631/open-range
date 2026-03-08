@@ -118,12 +118,13 @@ def run_episode(
 
     while not obs.done and step < max_steps:
         # Red's turn
-        red_cmd = red.act(obs.stdout)
+        red_cmd = red.act(obs)
         obs = env.step(RangeAction(command=red_cmd, mode="red"))
         red_trajectory.append({
             "command": red_cmd,
             "stdout": obs.stdout,
             "stderr": getattr(obs, "stderr", ""),
+            "alerts": getattr(obs, "alerts", []),
             "reward": obs.reward,
         })
         step += 1
@@ -132,12 +133,13 @@ def run_episode(
             break
 
         # Blue's turn
-        blue_cmd = blue.act(obs.stdout)
+        blue_cmd = blue.act(obs)
         obs = env.step(RangeAction(command=blue_cmd, mode="blue"))
         blue_trajectory.append({
             "command": blue_cmd,
             "stdout": obs.stdout,
             "stderr": getattr(obs, "stderr", ""),
+            "alerts": getattr(obs, "alerts", []),
             "reward": obs.reward,
         })
         step += 1
