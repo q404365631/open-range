@@ -344,6 +344,14 @@ class Mutator:
             context=context,
             rng=rng,
         )
+        if ops:
+            logger.info(
+                "Mutator policy %s chose ops=%s score=%.3f breakdown=%s",
+                self.policy.name,
+                [op.mutation_id for op in ops],
+                policy_score,
+                score_breakdown,
+            )
 
         if not ops:
             fallback = self._candidate_add_benign_noise(snapshot, rng)
