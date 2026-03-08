@@ -362,14 +362,15 @@ def test_init_sql_creates_referral_db(renderer, sqli_spec):
         assert "billing" in sql
 
 
-def test_init_sql_grants_app_user(renderer, db_flag_spec):
-    """Template grants privileges to app_user."""
+def test_init_sql_grants_runtime_db_user(renderer, db_flag_spec):
+    """Template grants privileges to the runtime-selected DB account."""
     with tempfile.TemporaryDirectory() as tmpdir:
         out = Path(tmpdir) / "out"
         renderer.render(db_flag_spec, out)
         sql = (out / "init.sql").read_text()
         assert "GRANT" in sql
-        assert "app_user" in sql
+        assert "TO '" in sql
+        assert "app_user" not in sql
 
 
 def test_init_sql_no_file_flag(renderer, sqli_spec):

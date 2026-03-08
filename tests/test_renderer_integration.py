@@ -220,7 +220,7 @@ class TestDockerCompose:
 
 
 class TestInitSQL:
-    """Verify rendered init.sql has referral_db and app_user."""
+    """Verify rendered init.sql has referral_db and runtime-selected DB grants."""
 
     def test_creates_referral_db(self, rendered_dir):
         sql = (rendered_dir / "init.sql").read_text()
@@ -242,10 +242,10 @@ class TestInitSQL:
         assert "patient_referrals" in sql
         assert "billing" in sql
 
-    def test_grants_app_user(self, rendered_dir):
+    def test_grants_runtime_db_user(self, rendered_dir):
         sql = (rendered_dir / "init.sql").read_text()
-        assert "app_user" in sql
         assert "GRANT" in sql
+        assert "TO '" in sql
 
     def test_has_flush_privileges(self, rendered_dir):
         sql = (rendered_dir / "init.sql").read_text()

@@ -1,9 +1,9 @@
 -- OpenRange database initialization
 -- Generated from SnapshotSpec
 
--- Application database (referral_db)
-CREATE DATABASE IF NOT EXISTS referral_db;
-USE referral_db;
+-- Application database
+CREATE DATABASE IF NOT EXISTS {{ db_name | default('referral_db') }};
+USE {{ db_name | default('referral_db') }};
 
 -- Users table (web app authentication)
 CREATE TABLE IF NOT EXISTS users (
@@ -86,9 +86,9 @@ CREATE TABLE IF NOT EXISTS secrets (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- Create and grant app_user (used by PHP web app)
-CREATE USER IF NOT EXISTS 'app_user'@'%' IDENTIFIED WITH mysql_native_password BY 'AppUs3r!2024';
-GRANT SELECT, INSERT, UPDATE ON referral_db.* TO 'app_user'@'%';
-GRANT SELECT ON flags.* TO 'app_user'@'%';
+-- Create and grant application DB user (used by PHP web app)
+CREATE USER IF NOT EXISTS '{{ db_user | default('svc_db') }}'@'%' IDENTIFIED WITH mysql_native_password BY '{{ db_password | default('SvcDb!401') }}';
+GRANT SELECT, INSERT, UPDATE ON {{ db_name | default('referral_db') }}.* TO '{{ db_user | default('svc_db') }}'@'%';
+GRANT SELECT ON flags.* TO '{{ db_user | default('svc_db') }}'@'%';
 
 FLUSH PRIVILEGES;

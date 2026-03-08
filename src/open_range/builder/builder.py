@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import random
+import re
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional
@@ -40,7 +41,10 @@ from open_range.protocols import (
 )
 
 from open_range.builder.prompts import BUILDER_SYSTEM_PROMPT
-from open_range.builder.manifest_graph import compile_manifest_topology
+from open_range.builder.manifest_graph import (
+    compile_manifest_topology,
+    runtime_contract_from_topology,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -569,7 +573,8 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
         elif isinstance(vc, str) and vc.strip():
             ip = v.injection_point
             if ip.startswith("/") and v.host == "web":
-                container_key = f"web:/var/www/portal{ip}"
+                web_doc_root = str(llm_output.topology.get("web_doc_root", "/var/www/portal")).rstrip("/")
+                container_key = f"web:{web_doc_root}{ip}"
                 if container_key not in files:
                     files[container_key] = vc
 
@@ -893,13 +898,13 @@ _DEFAULT_VULN_POOL: list[dict[str, Any]] = [
             },
             {
                 "step": 3,
-                "cmd": "ldapsearch -x -H ldap://ldap -D 'cn=webapp,dc=corp,dc=local' -w 'Svc!Ldap2024' -b 'dc=corp,dc=local' '(uid=*)'",
+                "cmd": "ldapsearch -x -H ldap://{ldap_host} -D '{ldap_bind_dn}' -w '{ldap_bind_pw}' -b '{ldap_search_base_dn}' '(uid=*)'",
                 "expect_stdout": "dn: uid=",
                 "host": "attacker",
             },
             {
                 "step": 4,
-                "cmd": "sshpass -p 'Svc!Ldap2024' ssh svc_webapp@db 'cat /var/flags/flag1.txt'",
+                "cmd": "sshpass -p '{credential_reuse_password}' ssh {credential_reuse_user}@{credential_reuse_host} 'cat /var/flags/flag1.txt'",
                 "expect_stdout": "FLAG{cr3d_r3us3_p1v0t}",
                 "host": "attacker",
             },
@@ -998,7 +1003,7 @@ class TemplateOnlyBuilder:
                 z = h.get("zone", "default")
                 zones.setdefault(z, []).append(h["name"])
 
-        topology = {
+        topology: dict[str, Any] = {
             "tier": int(manifest.get("tier", context.tier) or context.tier),
             "hosts": hosts,
             "zones": zones,
@@ -1012,6 +1017,9 @@ class TemplateOnlyBuilder:
             ),
             "mysql_root_password": "root" if any(v["type"] == "weak_creds" for v in chosen) else "r00tP@ss!",
         }
+        topology = compile_manifest_topology(manifest, topology)
+        runtime_contract = runtime_contract_from_topology(topology, manifest=manifest)
+        topology["runtime_contract"] = runtime_contract
 
         # Build truth graph
         vulns = []
@@ -1020,7 +1028,12 @@ class TemplateOnlyBuilder:
         golden_path: list[GoldenPathStep] = []
         step_offset = 0
 
-        for idx, v in enumerate(chosen):
+        for idx, raw in enumerate(chosen):
+            v = _realize_template_vuln(
+                raw,
+                topology=topology,
+                runtime_contract=runtime_contract,
+            )
             vulns.append(
                 Vulnerability(
                     id=v["id"],
@@ -1038,7 +1051,7 @@ class TemplateOnlyBuilder:
                 {
                     "vuln_id": v["id"],
                     "command": v.get("injection_point", ""),
-                    "description": f"Exploit {v['type']} on {v['host']}",
+                    "description": f"Exploit {v['type']} on {v.get('host', 'target')}",
                 }
             )
             flags.append(
@@ -1046,7 +1059,7 @@ class TemplateOnlyBuilder:
                     id=v.get("flag_id", f"flag{idx+1}"),
                     value=v.get("flag_value", f"FLAG{{test_{idx+1}}}"),
                     path=v.get("flag_path", f"/var/flags/flag{idx+1}.txt"),
-                    host=v.get("host", "web"),
+                    host=v.get("flag_host", v.get("host", runtime_contract["web_host"])),
                 )
             )
             for gs in v.get("golden_path_steps", []):
@@ -1060,6 +1073,7 @@ class TemplateOnlyBuilder:
                         step=step_offset,
                         command=cmd,
                         expect_in_stdout=gs["expect_stdout"],
+                        host=gs.get("host", "attacker"),
                         description=gs.get("description", ""),
                     )
                 )
@@ -1069,7 +1083,7 @@ class TemplateOnlyBuilder:
         evidence_spec = [
             EvidenceItem(
                 type="log_entry",
-                location="web:/var/log/app/access.log",
+                location=f"{runtime_contract['web_host']}:/var/log/app/access.log",
                 pattern="attack pattern from attacker IP",
             ),
             EvidenceItem(
@@ -1123,6 +1137,179 @@ class TemplateOnlyBuilder:
 # ---------------------------------------------------------------------------
 # Template payload helpers
 # ---------------------------------------------------------------------------
+
+
+def _realize_template_vuln(
+    template: dict[str, Any],
+    *,
+    topology: dict[str, Any],
+    runtime_contract: dict[str, str],
+) -> dict[str, Any]:
+    realized = deepcopy(template)
+    template_host = str(template.get("host", "")).strip()
+    service = str(template.get("service", "")).strip().lower()
+    resolved_host = _resolve_vuln_host(
+        template_host,
+        service=service,
+        topology=topology,
+        runtime_contract=runtime_contract,
+    )
+    realized["host"] = resolved_host
+
+    vuln_type = str(template.get("type", "")).strip()
+    if vuln_type == "credential_reuse":
+        realized["flag_host"] = runtime_contract.get(
+            "credential_reuse_host",
+            runtime_contract.get("db_host", resolved_host),
+        )
+    else:
+        realized["flag_host"] = resolved_host
+
+    for field in (
+        "injection_point",
+        "vulnerable_code",
+        "root_cause",
+        "blast_radius",
+        "remediation",
+    ):
+        value = realized.get(field)
+        if isinstance(value, str):
+            realized[field] = _rewrite_template_runtime_text(value, runtime_contract)
+
+    raw_steps = template.get("golden_path_steps", [])
+    realized_steps: list[dict[str, Any]] = []
+    if isinstance(raw_steps, list):
+        for raw_step in raw_steps:
+            if not isinstance(raw_step, dict):
+                continue
+            step = deepcopy(raw_step)
+            cmd = str(step.get("cmd", ""))
+            expect = str(step.get("expect_stdout", ""))
+            step["cmd"] = _rewrite_template_runtime_text(cmd, runtime_contract)
+            step["expect_stdout"] = _rewrite_template_runtime_text(expect, runtime_contract)
+            realized_steps.append(step)
+    realized["golden_path_steps"] = realized_steps
+    return realized
+
+
+def _resolve_vuln_host(
+    template_host: str,
+    *,
+    service: str,
+    topology: dict[str, Any],
+    runtime_contract: dict[str, str],
+) -> str:
+    hosts = _host_names(topology.get("hosts", []))
+    alias_map = {
+        "web": runtime_contract.get("web_host", "web"),
+        "db": runtime_contract.get("db_host", "db"),
+        "ldap": runtime_contract.get("ldap_host", "ldap"),
+    }
+    if template_host:
+        if template_host in hosts:
+            return template_host
+        if template_host in alias_map and alias_map[template_host]:
+            return alias_map[template_host]
+
+    if any(marker in service for marker in ("mysql", "mariadb", "postgres")):
+        candidate = runtime_contract.get("db_host", "db")
+        if not hosts or candidate in hosts:
+            return candidate
+    if any(marker in service for marker in ("ldap", "openldap")):
+        candidate = runtime_contract.get("ldap_host", "ldap")
+        if not hosts or candidate in hosts:
+            return candidate
+    if any(marker in service for marker in ("nginx", "apache", "http", "php")):
+        candidate = runtime_contract.get("web_host", "web")
+        if not hosts or candidate in hosts:
+            return candidate
+
+    if template_host:
+        return template_host
+    if hosts:
+        return hosts[0]
+    return runtime_contract.get("web_host", "web")
+
+
+def _host_names(raw_hosts: object) -> list[str]:
+    if not isinstance(raw_hosts, list):
+        return []
+    hosts: list[str] = []
+    for raw in raw_hosts:
+        if isinstance(raw, dict):
+            host = str(raw.get("name", "")).strip()
+        else:
+            host = str(raw).strip()
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+def _rewrite_template_runtime_text(text: str, runtime_contract: dict[str, str]) -> str:
+    if not text:
+        return text
+
+    web_host = runtime_contract.get("web_host", "web")
+    db_host = runtime_contract.get("db_host", "db")
+    ldap_host = runtime_contract.get("ldap_host", "ldap")
+    web_doc_root = runtime_contract.get("web_doc_root", "/var/www/portal")
+    web_config_path = runtime_contract.get("web_config_path", "/var/www/config.php")
+    db_name = runtime_contract.get("db_name", "referral_db")
+    db_user = runtime_contract.get("db_user", "svc_db")
+    db_password = runtime_contract.get("db_password", "SvcDb!401")
+    ldap_bind_dn = runtime_contract.get("ldap_bind_dn", f"cn={db_user},dc=corp,dc=local")
+    ldap_bind_pw = runtime_contract.get("ldap_bind_pw", db_password)
+    reuse_user = runtime_contract.get("credential_reuse_user", db_user)
+    reuse_host = runtime_contract.get("credential_reuse_host", db_host)
+    reuse_password = runtime_contract.get("credential_reuse_password", ldap_bind_pw)
+
+    updated = text
+    placeholders = {
+        "{web_host}": web_host,
+        "{db_host}": db_host,
+        "{ldap_host}": ldap_host,
+        "{web_doc_root}": web_doc_root,
+        "{web_config_path}": web_config_path.lstrip("/"),
+        "{db_name}": db_name,
+        "{db_user}": db_user,
+        "{db_password}": db_password,
+        "{ldap_bind_dn}": ldap_bind_dn,
+        "{ldap_bind_pw}": ldap_bind_pw,
+        "{ldap_search_base_dn}": runtime_contract.get("ldap_search_base_dn", "dc=corp,dc=local"),
+        "{credential_reuse_user}": reuse_user,
+        "{credential_reuse_host}": reuse_host,
+        "{credential_reuse_password}": reuse_password,
+    }
+    for placeholder, value in placeholders.items():
+        updated = updated.replace(placeholder, value)
+
+    replacements: list[tuple[str, str]] = [
+        ("http://web/", f"http://{web_host}/"),
+        ("http://web", f"http://{web_host}"),
+        ("ldap://ldap", f"ldap://{ldap_host}"),
+        ("svc_webapp@db", f"{reuse_user}@{reuse_host}"),
+        ("@db ", f"@{db_host} "),
+        ("@db'", f"@{db_host}'"),
+        ('@db"', f'@{db_host}"'),
+        (" -h db ", f" -h {db_host} "),
+        (" -h db", f" -h {db_host}"),
+        ("/var/www/portal", web_doc_root),
+        ("/var/www/config.php", web_config_path),
+        ("referral_db", db_name),
+        ("app_user", db_user),
+        ("AppUs3r!2024", db_password),
+        ("Svc!Ldap2024", ldap_bind_pw),
+    ]
+    for old, new in replacements:
+        updated = updated.replace(old, new)
+
+    updated = updated.replace("cn=webapp,dc=corp,dc=local", ldap_bind_dn)
+    updated = re.sub(
+        r"cn=webapp,dc=[A-Za-z0-9_-]+(?:,dc=[A-Za-z0-9_-]+)*",
+        ldap_bind_dn,
+        updated,
+    )
+    return updated
 
 
 def _manifest_topology_users(
@@ -1194,6 +1381,7 @@ def render_template_payloads(
     manifest: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     topology = snapshot.topology if isinstance(snapshot.topology, dict) else {}
+    runtime_contract = runtime_contract_from_topology(topology, manifest=manifest)
     flags = snapshot.flags
     evidence_spec = snapshot.evidence_spec
     vuln_types = {v.type for v in snapshot.truth_graph.vulns}
@@ -1204,31 +1392,46 @@ def render_template_payloads(
     )
     company_name = str(topology.get("org_name") or company.get("name") or "OpenRange")
     domain = str(topology.get("domain") or company.get("domain") or "corp.local")
+    web_host = runtime_contract["web_host"]
+    db_host = runtime_contract["db_host"]
+    web_doc_root = runtime_contract["web_doc_root"]
+    web_config_path = runtime_contract["web_config_path"]
+    db_name = runtime_contract["db_name"]
 
     files: dict[str, str] = {
-        "web:/var/www/portal/index.php": _default_index_php(company_name),
-        "web:/var/www/portal/login.php": _default_login_php(),
-        "web:/var/www/config.php": _default_config_php(domain=domain),
+        f"{web_host}:{_join_posix(web_doc_root, 'index.php')}": _default_index_php(company_name),
+        f"{web_host}:{_join_posix(web_doc_root, 'login.php')}": _default_login_php(),
+        f"{web_host}:{web_config_path}": _default_config_php(
+            domain=domain,
+            db_host=runtime_contract["db_host"],
+            db_name=runtime_contract["db_name"],
+            db_user=runtime_contract["db_user"],
+            db_pass=runtime_contract["db_password"],
+            ldap_bind_dn=runtime_contract["ldap_bind_dn"],
+            ldap_bind_pw=runtime_contract["ldap_bind_pw"],
+        ),
     }
 
     if "sqli" in vuln_types:
-        files["web:/var/www/portal/search.php"] = _search_php(
+        files[f"{web_host}:{_join_posix(web_doc_root, 'search.php')}"] = _search_php(
             _flag_value_for_type(snapshot, "sqli")
         )
 
     if "path_traversal" in vuln_types:
-        files["web:/var/www/portal/download.php"] = _download_php(
+        files[f"{web_host}:{_join_posix(web_doc_root, 'download.php')}"] = _download_php(
             path_flag=_flag_value_for_type(snapshot, "path_traversal"),
             flag_names=_flag_names_for_type(snapshot, "path_traversal"),
+            config_path=web_config_path,
         )
     elif "credential_reuse" in vuln_types:
-        files["web:/var/www/portal/download.php"] = _download_php(
+        files[f"{web_host}:{_join_posix(web_doc_root, 'download.php')}"] = _download_php(
             path_flag="",
             flag_names=[],
+            config_path=web_config_path,
         )
 
     if "idor" in vuln_types:
-        files["web:/var/www/portal/api/index.php"] = _idor_api_php(
+        files[f"{web_host}:{_join_posix(web_doc_root, 'api/index.php')}"] = _idor_api_php(
             _flag_value_for_type(snapshot, "idor"),
         )
 
@@ -1249,7 +1452,7 @@ def render_template_payloads(
                         "CREATE USER IF NOT EXISTS 'leaked_user'@'%' "
                         "IDENTIFIED BY 'leaked_pass';\n"
                         "GRANT SELECT ON flags.* TO 'leaked_user'@'%';\n"
-                        "GRANT SELECT ON referral_db.* TO 'leaked_user'@'%';\n"
+                        f"GRANT SELECT ON {_sql_ident(db_name)}.* TO 'leaked_user'@'%';\n"
                         "FLUSH PRIVILEGES;\n"
                     ),
                 )
@@ -1265,7 +1468,7 @@ def render_template_payloads(
         )
 
     if "weak_creds" in vuln_types:
-        files["db:/tmp/openrange-root-password.txt"] = "root\n"
+        files[f"{db_host}:/tmp/openrange-root-password.txt"] = "root\n"
 
     return files
 
@@ -1315,6 +1518,15 @@ def _append_sql(existing: str, fragment: str) -> str:
     return f"{existing.rstrip()}\n{fragment}"
 
 
+def _join_posix(base: str, leaf: str) -> str:
+    return (PurePosixPath(base) / leaf).as_posix()
+
+
+def _sql_ident(value: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9_]", "", value)
+    return token or "referral_db"
+
+
 def _sql_escape(value: str) -> str:
     """Escape a string for use in a SQL single-quoted literal.
 
@@ -1356,15 +1568,26 @@ echo "Login";
 ?>"""
 
 
-def _default_config_php(*, domain: str) -> str:
+def _default_config_php(
+    *,
+    domain: str,
+    db_host: str,
+    db_name: str,
+    db_user: str,
+    db_pass: str,
+    ldap_bind_dn: str,
+    ldap_bind_pw: str,
+) -> str:
     ldap_dn = ",".join(f"dc={part}" for part in domain.split(".") if part) or "dc=corp,dc=local"
+    bind_dn = ldap_bind_dn or f"cn={db_user},{ldap_dn}"
+    bind_pw = ldap_bind_pw or db_pass
     return f"""<?php
-$db_host = "db";
-$db_name = "referral_db";
-$db_user = "app_user";
-$db_pass = "AppUs3r!2024";
-$ldap_bind_dn = "cn=webapp,{ldap_dn}";
-$ldap_bind_pw = "Svc!Ldap2024";
+$db_host = "{db_host}";
+$db_name = "{db_name}";
+$db_user = "{db_user}";
+$db_pass = "{db_pass}";
+$ldap_bind_dn = "{bind_dn}";
+$ldap_bind_pw = "{bind_pw}";
 ?>"""
 
 
@@ -1379,7 +1602,12 @@ if (stripos($q, "union") !== false || stripos($q, "flag") !== false) {{
 ?>"""
 
 
-def _download_php(path_flag: str, flag_names: list[str] | None = None) -> str:
+def _download_php(
+    path_flag: str,
+    flag_names: list[str] | None = None,
+    *,
+    config_path: str,
+) -> str:
     flag = path_flag or "FLAG{placeholder}"
     raw_names = ["flag1.txt"] if flag_names is None else flag_names
     cases = "\n".join(
@@ -1393,7 +1621,7 @@ $file = $_GET["file"] ?? "";
 if ($file === "report.pdf") {{
     echo "PDF";
 }} elseif (strpos($file, "config.php") !== false) {{
-    readfile("/var/www/config.php");
+    readfile("{config_path}");
 }} elseif (strpos($file, "/etc/passwd") !== false) {{
     echo "root:x:0:0:root:/root:/bin/bash";
 }} {cases} else {{
