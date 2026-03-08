@@ -3,8 +3,11 @@
 Provides binary and progressive reward functions for training models
 to solve CTF challenges via tool-calling in qwen3_coder XML format.
 
-Binary reward: flag captured = 1.0, else 0.0
-Progressive reward: multi-signal (flag, format, efficiency, progression, hallucination)
+Reward design (v9, from open-trajectory-gym):
+  - Flag-dominant (0.85) maintains ~0.90 RLOO solve/fail gap
+  - Process signals (0.15 total) create within-group variance
+  - Physics-inspired efficiency: step_ratio × action_novelty × temporal_decay
+  - Hallucination penalty decays ALL process signals (energy loss model)
 
 Usage::
 
@@ -22,8 +25,11 @@ Or via CLI::
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
+import math
+import random
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +47,58 @@ _TOOL_CALL_RE = re.compile(
 )
 _PARAM_RE = re.compile(r"<parameter=(\w+)>(.*?)</parameter>", re.DOTALL)
 _FLAG_RE = re.compile(r"flag\{[^}]+\}", re.IGNORECASE)
+
+# ---------------------------------------------------------------------------
+# Known tools & phase classification (from open-trajectory-gym)
+# ---------------------------------------------------------------------------
+
+_FLAG_PLACEHOLDERS = frozenset({
+    "content_of_flag_here", "FLAG{...}", "", "CHECK",
+    "gctf{DUMMY_FLAG}", "flag{this_is_fake_flag}",
+})
+
+# OpenEnv MCP tools + common CTF tools
+_KNOWN_TOOL_NAMES = frozenset({
+    "shell_command", "exec_command", "execute_command",
+    "python_code", "read_file", "grep", "file_search",
+    "submit_flag", "flag_found", "submit_finding",
+    "get_challenge", "get_progress", "check_services",
+    "write_stdin", "apply_patch", "web_search",
+    "list_sessions", "close_session",
+})
+
+_SHELL_WRAPPERS = frozenset({
+    "shell_command", "exec_command", "execute_command",
+})
+
+_FLAG_TOOLS = frozenset({"submit_flag", "flag_found"})
+
+# Phase classification by binary name (set-based, no regex)
+_RECON_BINARIES = frozenset({
+    "nmap", "masscan", "ping", "traceroute", "whois", "dig",
+    "nslookup", "host", "arp-scan", "netdiscover", "ftp",
+    "smbclient", "smbmap", "rpcclient", "snmpwalk", "enum4linux",
+})
+_ENUM_BINARIES = frozenset({
+    "curl", "wget", "gobuster", "ffuf", "dirb", "dirsearch",
+    "nikto", "wpscan", "whatweb", "ls", "cat", "head", "tail",
+    "find", "grep", "strings", "file", "id", "whoami", "ps",
+    "env", "uname", "hostname", "ip", "ifconfig", "netstat", "ss",
+    "xxd", "hexdump", "objdump", "readelf", "unzip", "tar",
+})
+_EXPLOIT_BINARIES = frozenset({
+    "sqlmap", "hydra", "john", "hashcat", "python", "python3",
+    "ruby", "perl", "gcc", "nc", "ncat", "netcat", "ssh", "scp",
+    "msfconsole", "msfvenom", "chmod", "gdb", "ltrace", "strace",
+    "sshpass", "bash", "node", "java", "php", "socat",
+})
+_TOOL_NAME_PHASES = {
+    "web_search": "recon", "read_file": "enum", "grep": "enum",
+    "file_search": "enum", "python_code": "exploit",
+    "apply_patch": "exploit", "flag_found": "flag",
+    "submit_flag": "flag", "get_challenge": "recon",
+    "check_services": "recon", "get_progress": "enum",
+}
 
 
 def parse_tool_calls(text: str) -> list[dict[str, Any]]:
@@ -66,6 +124,60 @@ def extract_flags_from_text(text: str) -> list[str]:
     return _FLAG_RE.findall(text)
 
 
+def _is_real_flag(flag: str) -> bool:
+    """Return True if flag is a real value, not a placeholder."""
+    if not flag:
+        return False
+    if flag in _FLAG_PLACEHOLDERS:
+        return False
+    for poison in ("content_of_flag_here", "dummy_flag", "fake_flag",
+                    "this_is_fake", "placeholder"):
+        if poison in flag.lower():
+            return False
+    return True
+
+
+def _action_fingerprint(tc: dict[str, Any]) -> str:
+    """Fingerprint a tool call. Shell wrappers include binary name."""
+    name = tc.get("name", "")
+    if name in _SHELL_WRAPPERS:
+        cmd = _extract_command_str(tc)
+        if cmd:
+            binary = cmd.split()[0].rsplit("/", 1)[-1].lower()
+            return f"{name}:{binary}"
+    return name
+
+
+def _extract_command_str(tc: dict[str, Any]) -> str:
+    """Extract the command string from a tool call's arguments."""
+    args = tc.get("arguments", {})
+    if isinstance(args, dict):
+        for key in ("command", "code", "content", "query", "path", "flag"):
+            val = args.get(key)
+            if val and isinstance(val, str):
+                return val.strip()
+    return ""
+
+
+def _classify_phase(tc: dict[str, Any]) -> str | None:
+    """Classify a tool call into a CTF phase. Set-based, no regex."""
+    name = tc.get("name", "")
+    if name in _TOOL_NAME_PHASES:
+        return _TOOL_NAME_PHASES[name]
+    if name in _SHELL_WRAPPERS:
+        cmd = _extract_command_str(tc)
+        if not cmd:
+            return None
+        first_token = cmd.split()[0].rsplit("/", 1)[-1].lower()
+        if first_token in _RECON_BINARIES:
+            return "recon"
+        if first_token in _ENUM_BINARIES:
+            return "enum"
+        if first_token in _EXPLOIT_BINARIES:
+            return "exploit"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Reward functions (TRL GRPOTrainer compatible)
 # ---------------------------------------------------------------------------
@@ -74,16 +186,18 @@ def extract_flags_from_text(text: str) -> list[str]:
 # completions: list of list of dicts (messages) or list of strings
 # kwargs may include: prompts, ground_truth, ground_truth_flag, etc.
 
+# RNG for noise injection (variance guarantee)
+_reward_rng = random.Random(3407)
+
 
 def binary_reward(completions: list, **kwargs) -> list[float]:
     """Binary flag-capture reward: 1.0 if correct flag found, else 0.0.
 
     Checks completions for:
     1. submit_flag tool calls with matching value
-    2. flag{...} patterns matching ground truth
+    2. flag{...} patterns matching ground truth (only if flag tool was called)
 
-    Expects kwargs["ground_truth"] or kwargs["ground_truth_flag"]
-    to contain the correct flag per sample.
+    Filters out known placeholder/fake flags.
     """
     ground_truths = kwargs.get("ground_truth") or kwargs.get("ground_truth_flag", [])
     if not ground_truths:
@@ -92,139 +206,221 @@ def binary_reward(completions: list, **kwargs) -> list[float]:
     rewards = []
     for i, completion in enumerate(completions):
         gt = ground_truths[i] if i < len(ground_truths) else ""
-        if not gt:
+        if not gt or not _is_real_flag(gt):
             rewards.append(0.0)
             continue
 
-        # Extract text from completion
         text = _completion_to_text(completion)
-
-        # Check submit_flag tool calls
         tool_calls = parse_tool_calls(text)
+
+        found = False
         for tc in tool_calls:
-            if tc["name"] in ("submit_flag", "flag_found"):
+            if tc["name"] in _FLAG_TOOLS:
                 submitted = tc["arguments"].get("flag", tc["arguments"].get("value", ""))
                 if submitted.strip() == gt.strip():
-                    rewards.append(1.0)
+                    found = True
                     break
-        else:
-            # Check for flag pattern in raw text
-            flags = extract_flags_from_text(text)
-            if any(f.strip() == gt.strip() for f in flags):
-                rewards.append(1.0)
-            else:
-                rewards.append(0.0)
+        if not found:
+            # Only count flag pattern if a flag submission tool was called
+            has_flag_tool = any(tc["name"] in _FLAG_TOOLS for tc in tool_calls)
+            if has_flag_tool:
+                flags = extract_flags_from_text(text)
+                found = any(f.strip() == gt.strip() for f in flags)
+
+        rewards.append(1.0 if found else 0.0)
 
     return rewards
 
 
 def progressive_reward(completions: list, **kwargs) -> list[float]:
-    """Multi-signal progressive reward for CTF trajectories.
+    """v9 production reward: flag(0.85) + efficiency(0.10) + format(0.05).
 
-    Signals (weights sum to 1.0):
-    - flag_capture (0.40): correct flag found
-    - tool_format  (0.15): well-formed qwen3_coder tool calls
-    - efficiency   (0.10): fewer tool calls = better (gamma^n)
-    - progression  (0.15): recon → exploit → flag sequence
-    - reasoning    (0.10): has <think> reasoning blocks
-    - hallucination(-0.20): penalty per incorrect flag submission
+    Flag-dominant weighting maintains ~0.90 RLOO solve/fail gap.
+    Process signals (0.15) create within-group variance without
+    compressing between-group gradient signal.
+
+    Key mechanisms from open-trajectory-gym:
+    - Physics-inspired efficiency: step_ratio × action_novelty × temporal_decay
+    - Minimum work gate: <3 tool calls caps process signals
+    - Hallucination energy loss: wrong flag decays ALL process signals
+    - Premature hallucination penalty: earlier bad flags penalized more
+    - Near-miss tolerance: similarity ≥ 0.8 reduces penalty 90%
+    - Noise injection: ±0.01 prevents zero-variance batches
     """
     ground_truths = kwargs.get("ground_truth") or kwargs.get("ground_truth_flag", [])
+    optimal_steps_list = kwargs.get("optimal_steps", [])
     rewards = []
 
     for i, completion in enumerate(completions):
         gt = ground_truths[i] if i < len(ground_truths) else ""
+        opt_steps = optimal_steps_list[i] if i < len(optimal_steps_list) else None
         text = _completion_to_text(completion)
         tool_calls = parse_tool_calls(text)
 
-        score = 0.0
+        # --- Flag score (0.85 weight) ---
+        flag_sc = _score_flag(text, gt, tool_calls)
 
-        # 1. Flag capture (0.40)
-        flag_found = False
-        for tc in tool_calls:
-            if tc["name"] in ("submit_flag", "flag_found"):
-                submitted = tc["arguments"].get("flag", tc["arguments"].get("value", ""))
-                if gt and submitted.strip() == gt.strip():
-                    flag_found = True
-                    break
-        if not flag_found:
-            flags = extract_flags_from_text(text)
-            flag_found = any(f.strip() == gt.strip() for f in flags) if gt else False
-        if flag_found:
-            score += 0.40
+        # --- Efficiency score (0.10 weight) ---
+        eff_sc = _score_efficiency(
+            len(tool_calls), opt_steps,
+            flag_found=(flag_sc >= 1.0),
+            tool_calls=tool_calls,
+        )
 
-        # 2. Tool format (0.15) - well-formed tool calls present
-        if tool_calls:
-            score += 0.15
-        elif "<tool_call>" in text:
-            # Attempted but malformed
-            score += 0.05
+        # --- Format score (0.05 weight) ---
+        fmt_sc = _score_format(tool_calls)
 
-        # 3. Efficiency (0.10) - gamma^n_calls, fewer = better
-        n_calls = max(len(tool_calls), 1)
-        gamma = 0.92
-        score += 0.10 * (gamma ** (n_calls - 1))
+        # --- Minimum work gate ---
+        if len(tool_calls) < 3:
+            fmt_sc = min(fmt_sc, 0.3)
 
-        # 4. Progression (0.15) - recon → exploit → flag sequence
-        progression_score = _score_progression(tool_calls)
-        score += 0.15 * progression_score
+        # --- Hallucination penalty (energy loss) ---
+        hall_sc = _score_hallucination(tool_calls, flag_sc, gt)
+        if hall_sc < 0:
+            _DECAY = 0.3
+            eff_sc *= _DECAY
+            fmt_sc *= _DECAY
 
-        # 5. Reasoning (0.10) - has thinking blocks
-        if "<think>" in text and "</think>" in text:
-            score += 0.10
-        elif "<think>" in text:
-            score += 0.05
+        # --- Weighted sum ---
+        score = (
+            0.85 * flag_sc
+            + 0.10 * eff_sc
+            + 0.05 * fmt_sc
+            + hall_sc  # Additive penalty (already negative)
+        )
 
-        # 6. Hallucination penalty (-0.20 per bad flag)
-        if gt:
-            bad_flags = 0
-            for tc in tool_calls:
-                if tc["name"] in ("submit_flag", "flag_found"):
-                    submitted = tc["arguments"].get("flag", tc["arguments"].get("value", ""))
-                    if submitted.strip() and submitted.strip() != gt.strip():
-                        bad_flags += 1
-            score -= 0.20 * bad_flags
+        # Noise injection for variance guarantee
+        score += _reward_rng.uniform(-0.01, 0.01)
 
-        rewards.append(max(score, -1.0))  # Floor at -1.0
+        rewards.append(max(score, -1.0))
 
     return rewards
 
 
-def _score_progression(tool_calls: list[dict]) -> float:
-    """Score the recon → exploit → flag progression pattern.
+def _score_flag(text: str, gt: str, tool_calls: list[dict]) -> float:
+    """Score flag capture. Returns 0.0, 0.1, or 1.0."""
+    if not gt or not _is_real_flag(gt):
+        return 0.0
 
-    Returns 0.0-1.0 based on how well tool calls follow the
-    expected CTF attack sequence.
+    # Check flag submission tool calls
+    has_flag_tool = False
+    for tc in tool_calls:
+        if tc["name"] in _FLAG_TOOLS:
+            has_flag_tool = True
+            submitted = tc["arguments"].get("flag", tc["arguments"].get("value", ""))
+            if submitted.strip() == gt.strip():
+                return 1.0
+
+    # Exact match in text (only if flag tool was called)
+    if has_flag_tool and gt in text:
+        return 1.0
+
+    # Partial credit: flag-like pattern found (learning signal)
+    if re.search(r"FLAG\{[a-zA-Z0-9_-]+\}", text):
+        return 0.1
+
+    return 0.0
+
+
+def _score_efficiency(
+    actual_steps: int,
+    optimal_steps: int | None,
+    flag_found: bool = False,
+    tool_calls: list[dict] | None = None,
+) -> float:
+    """Physics-inspired efficiency: step_ratio × action_novelty × temporal_decay.
+
+    Three components:
+      1. Step ratio (classical efficiency): min(optimal/actual, 1.0)
+      2. Action novelty (information redundancy): unique_fingerprints / total
+      3. Temporal decay (time cost): exp(-λ × excess_steps / optimal)
+
+    Non-flag completions capped at 0.3. <3 steps → 0.0.
     """
+    if actual_steps < 3:
+        return 0.0
+
+    opt = optimal_steps or 10
+
+    step_ratio = min(opt / actual_steps, 1.0)
+
+    # Action novelty via fingerprinting
+    if tool_calls and len(tool_calls) > 0:
+        fingerprints = [_action_fingerprint(tc) for tc in tool_calls]
+        novelty = len(set(fingerprints)) / len(fingerprints)
+    else:
+        novelty = 1.0
+
+    # Temporal decay (λ=0.3)
+    excess = max(0, actual_steps - opt) / max(opt, 1)
+    time_decay = math.exp(-0.3 * excess)
+
+    score = step_ratio * novelty * time_decay
+
+    if not flag_found:
+        return min(score, 0.3)
+    return score
+
+
+def _score_format(tool_calls: list[dict]) -> float:
+    """Signal fidelity: valid instrument readings from known tools only."""
     if not tool_calls:
         return 0.0
 
-    names = [tc["name"] for tc in tool_calls]
+    valid = 0
+    known_count = 0
+    for tc in tool_calls:
+        name = tc.get("name", "")
+        if name not in _KNOWN_TOOL_NAMES:
+            continue
+        known_count += 1
+        args = tc.get("arguments", {})
+        if isinstance(args, dict) and args:
+            valid += 1
+        elif args:
+            valid += 0.5
 
-    # Define stages
-    recon_tools = {"shell_command", "exec_command", "web_search", "file_search", "grep", "read_file", "list_sessions"}
-    exploit_tools = {"shell_command", "exec_command", "python_code", "write_stdin", "apply_patch"}
-    flag_tools = {"submit_flag", "flag_found"}
+    if known_count == 0:
+        return 0.0
+    return min(valid / known_count, 1.0)
 
-    phases_hit = 0.0
 
-    # Check for recon phase (early tool calls)
-    early = names[:max(len(names) // 3, 1)]
-    if any(n in recon_tools for n in early):
-        phases_hit += 0.33
+def _score_hallucination(
+    tool_calls: list[dict],
+    flag_sc: float,
+    gt: str | None,
+) -> float:
+    """Energy loss for false flag submissions.
 
-    # Check for exploitation (middle tool calls)
-    if len(names) > 1:
-        mid = names[len(names) // 3: 2 * len(names) // 3] or names[1:]
-        if any(n in exploit_tools for n in mid):
-            phases_hit += 0.33
+    Returns negative penalty. Features:
+    - Premature penalty: earlier bad flags penalized more (×1.0-2.0)
+    - Near-miss tolerance: similarity ≥ 0.8 reduces penalty 90%
+    """
+    if flag_sc >= 1.0:
+        return 0.0
 
-    # Check for flag submission (late tool calls)
-    late = names[-max(len(names) // 3, 1):]
-    if any(n in flag_tools for n in late):
-        phases_hit += 0.34
+    penalty = 0.20
+    for tc in tool_calls:
+        if tc["name"] in _FLAG_TOOLS:
+            pen = -penalty
 
-    return min(phases_hit, 1.0)
+            # Premature submission multiplier
+            premature_mult = 1.0 + max(0.0, 1.0 - len(tool_calls) / 5.0)
+            pen *= premature_mult
+
+            # Near-miss tolerance
+            if gt and _is_real_flag(gt):
+                submitted = tc["arguments"].get("flag", tc["arguments"].get("value", ""))
+                if submitted:
+                    similarity = difflib.SequenceMatcher(
+                        None, submitted.strip(), gt.strip()
+                    ).ratio()
+                    if similarity >= 0.8:
+                        pen *= 0.1
+
+            return pen
+
+    return 0.0
 
 
 def _completion_to_text(completion: Any) -> str:
@@ -330,6 +526,27 @@ def make_online_reward(env_url: str, timeout: float = 30.0):
 # ---------------------------------------------------------------------------
 
 
+# OpenEnv tool definitions for chat template (activates qwen3_coder format)
+OPENENV_TOOLS = [
+    {"type": "function", "function": {"name": "shell_command", "description": "Execute a shell command",
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "python_code", "description": "Execute Python code",
+        "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}}},
+    {"type": "function", "function": {"name": "submit_flag", "description": "Submit a captured flag",
+        "parameters": {"type": "object", "properties": {"flag": {"type": "string"}}, "required": ["flag"]}}},
+    {"type": "function", "function": {"name": "submit_finding", "description": "Submit a security finding",
+        "parameters": {"type": "object", "properties": {"description": {"type": "string"}}, "required": ["description"]}}},
+    {"type": "function", "function": {"name": "read_file", "description": "Read a file",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
+    {"type": "function", "function": {"name": "get_challenge", "description": "Get challenge briefing",
+        "parameters": {"type": "object", "properties": {"role": {"type": "string", "default": "red"}}}}},
+    {"type": "function", "function": {"name": "get_progress", "description": "Get current progress",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "check_services", "description": "Check service health",
+        "parameters": {"type": "object", "properties": {}}}},
+]
+
+
 def load_grpo_data(
     data_paths: list[str | Path],
     tokenizer: Any,
@@ -340,6 +557,9 @@ def load_grpo_data(
     - messages: list of system/user messages (prompts only, no assistant)
     - ground_truth_flag: the correct flag for reward computation
     - metadata: optional challenge metadata
+
+    CRITICAL: Passes tools= to apply_chat_template to activate qwen3_coder
+    XML format. Without tools=, the model generates wrong format.
 
     Returns list of dicts with "prompt" (tokenized text) and "ground_truth".
     """
@@ -358,6 +578,12 @@ def load_grpo_data(
             skipped += 1
             continue
 
+        # Filter out placeholder flags
+        if gt_flag and not _is_real_flag(gt_flag):
+            logger.warning("Skipped sample with placeholder flag: %s", gt_flag)
+            skipped += 1
+            continue
+
         # Keep only system and user messages (prompts, no completions)
         prompt_messages = [m for m in messages if m.get("role") in ("system", "user")]
         if not prompt_messages:
@@ -370,6 +596,7 @@ def load_grpo_data(
         try:
             prompt_text = tokenizer.apply_chat_template(
                 converted,
+                tools=OPENENV_TOOLS,  # Activates qwen3_coder XML format
                 tokenize=False,
                 add_generation_prompt=True,
             )
@@ -456,7 +683,7 @@ def run_grpo(config: GRPOConfig) -> dict[str, Any]:
     from trl import GRPOTrainer, GRPOConfig as TRLGRPOConfig
     from datasets import Dataset
 
-    # --- 1. Load model with fast inference for GRPO ---
+    # --- 1. Load model (no fast_inference — TRL 0.24.0 incompatible with vLLM 0.17.0) ---
     logger.info("Loading model: %s", config.model_name)
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=config.model_name,
@@ -465,7 +692,6 @@ def run_grpo(config: GRPOConfig) -> dict[str, Any]:
         load_in_16bit=config.load_in_16bit,
         full_finetuning=False,
         dtype=None,
-        fast_inference=True,  # Required for Unsloth GRPO (uses vLLM internally)
     )
 
     # --- 2. Apply LoRA ---

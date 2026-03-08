@@ -161,11 +161,20 @@ class NPCPersona(BaseModel):
 
 
 class NPCTrafficSpec(BaseModel):
-    """NPC traffic configuration."""
+    """NPC traffic configuration.
 
-    level: int = 0  # 0=shell scripts, 1=LLM personas
-    rate_lambda: float = 10.0  # requests/minute
+    Controls NPC background noise intensity and LLM agent behavior.
+    All fields have sensible defaults so a bare ``NPCTrafficSpec()``
+    works for Tier 1 shell-script-only mode.
+    """
+
+    level: int = 0  # 0=shell scripts only, 1=shell scripts + LLM agents
+    rate_lambda: float = 10.0  # shell script requests/minute
     scripts: list[str] = Field(default_factory=list)
+    max_concurrent_agents: int = 4  # cap on simultaneous LLM NPC tasks
+    model: str = ""  # LLM model override; empty = use OPENRANGE_NPC_MODEL env
+    action_interval_min: int = 2  # minutes between LLM NPC routine actions
+    chat_message_count: int = 10  # Level 0 deterministic chat messages to seed
 
 
 class TaskType(str, Enum):

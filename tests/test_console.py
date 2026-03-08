@@ -19,10 +19,10 @@ from open_range.server.environment import RangeEnvironment
 
 
 @pytest.fixture()
-def client():
-    """Create a TestClient with a shared env on app.state for console API."""
+def client(monkeypatch: pytest.MonkeyPatch):
+    """Create a TestClient with a local env for direct inspection tests."""
+    monkeypatch.setenv("OPENRANGE_MOCK", "1")
     app = create_app()
-    # Store a shared env so console API endpoints can access state
     env = RangeEnvironment(docker_available=False)
     app.state.env = env
     clear_history()

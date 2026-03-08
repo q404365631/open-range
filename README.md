@@ -109,6 +109,10 @@ uv run openrange episode -s /tmp/openrange-tier2/snapshot/spec.json --docker --g
 uv run openrange server                         # default: 0.0.0.0:8000
 uv run openrange server --port 9000             # custom port
 
+# ManagedSnapshotRuntime is enabled by default for the shipped server.
+# Disable it only for isolated tests or local debugging, for example:
+# OPENRANGE_DISABLE_MANAGED_RUNTIME=1 uv run pytest tests/test_app.py -q
+
 # Or via uvicorn directly
 uv run uvicorn open_range.server.app:app --host 0.0.0.0 --port 8000 --reload
 

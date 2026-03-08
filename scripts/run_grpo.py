@@ -11,9 +11,12 @@ Usage:
 """
 
 import argparse
+import difflib
 import json
 import logging
+import math
 import os
+import random
 import re
 import sys
 from pathlib import Path
@@ -57,6 +60,68 @@ _TOOL_CALL_RE = re.compile(
 _PARAM_RE = re.compile(r"<parameter=(\w+)>(.*?)</parameter>", re.DOTALL)
 _FLAG_RE = re.compile(r"flag\{[^}]+\}", re.IGNORECASE)
 
+# ---------------------------------------------------------------------------
+# Known tools & classification (from open-trajectory-gym v9)
+# ---------------------------------------------------------------------------
+
+_FLAG_PLACEHOLDERS = frozenset({
+    "content_of_flag_here", "FLAG{...}", "", "CHECK",
+    "gctf{DUMMY_FLAG}", "flag{this_is_fake_flag}",
+})
+
+_KNOWN_TOOL_NAMES = frozenset({
+    "shell_command", "exec_command", "execute_command",
+    "python_code", "read_file", "grep", "file_search",
+    "submit_flag", "flag_found", "submit_finding",
+    "get_challenge", "get_progress", "check_services",
+    "write_stdin", "apply_patch", "web_search",
+    "list_sessions", "close_session",
+})
+
+_SHELL_WRAPPERS = frozenset({
+    "shell_command", "exec_command", "execute_command",
+})
+
+_FLAG_TOOLS = frozenset({"submit_flag", "flag_found"})
+
+_RECON_BINARIES = frozenset({
+    "nmap", "masscan", "ping", "traceroute", "whois", "dig",
+    "nslookup", "host", "smbclient", "smbmap", "enum4linux",
+})
+_ENUM_BINARIES = frozenset({
+    "curl", "wget", "gobuster", "ffuf", "dirb", "nikto",
+    "ls", "cat", "head", "tail", "find", "grep", "strings",
+    "file", "id", "whoami", "ps", "env", "uname", "hostname",
+    "ip", "ifconfig", "netstat", "ss", "xxd", "hexdump",
+})
+_EXPLOIT_BINARIES = frozenset({
+    "sqlmap", "hydra", "john", "hashcat", "python", "python3",
+    "ruby", "perl", "gcc", "nc", "ncat", "netcat", "ssh",
+    "msfconsole", "msfvenom", "chmod", "gdb", "bash", "php",
+})
+
+# OpenEnv tool definitions (activates qwen3_coder format in chat template)
+OPENENV_TOOLS = [
+    {"type": "function", "function": {"name": "shell_command", "description": "Execute a shell command",
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "python_code", "description": "Execute Python code",
+        "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}}},
+    {"type": "function", "function": {"name": "submit_flag", "description": "Submit a captured flag",
+        "parameters": {"type": "object", "properties": {"flag": {"type": "string"}}, "required": ["flag"]}}},
+    {"type": "function", "function": {"name": "submit_finding", "description": "Submit a security finding",
+        "parameters": {"type": "object", "properties": {"description": {"type": "string"}}, "required": ["description"]}}},
+    {"type": "function", "function": {"name": "read_file", "description": "Read a file",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
+    {"type": "function", "function": {"name": "get_challenge", "description": "Get challenge briefing",
+        "parameters": {"type": "object", "properties": {"role": {"type": "string", "default": "red"}}}}},
+    {"type": "function", "function": {"name": "get_progress", "description": "Get current progress",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "check_services", "description": "Check service health",
+        "parameters": {"type": "object", "properties": {}}}},
+]
+
+_reward_rng = random.Random(3407)
+
 
 def parse_tool_calls(text):
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
@@ -83,102 +148,244 @@ def completion_to_text(c):
     return str(c)
 
 
+def is_real_flag(flag):
+    if not flag:
+        return False
+    if flag in _FLAG_PLACEHOLDERS:
+        return False
+    for poison in ("content_of_flag_here", "dummy_flag", "fake_flag",
+                    "this_is_fake", "placeholder"):
+        if poison in flag.lower():
+            return False
+    return True
+
+
+def action_fingerprint(tc):
+    name = tc.get("name", "")
+    if name in _SHELL_WRAPPERS:
+        args = tc.get("arguments", {})
+        cmd = args.get("command", args.get("code", "")) if isinstance(args, dict) else ""
+        if cmd:
+            binary = cmd.split()[0].rsplit("/", 1)[-1].lower()
+            return f"{name}:{binary}"
+    return name
+
+
 # ---------------------------------------------------------------------------
-# Reward functions
+# Reward functions (v9: flag=0.85, efficiency=0.10, format=0.05)
 # ---------------------------------------------------------------------------
 
 
 def binary_reward_fn(completions, **kwargs):
-    """1.0 if correct flag found, else 0.0."""
+    """1.0 if correct flag found, else 0.0. Filters placeholder flags."""
     gts = kwargs.get("ground_truth", [])
     rewards = []
     for i, c in enumerate(completions):
         gt = gts[i] if i < len(gts) else ""
-        if not gt:
+        if not gt or not is_real_flag(gt):
             rewards.append(0.0)
             continue
         text = completion_to_text(c)
 
-        # Check tool call submissions
         found = False
         for tc in parse_tool_calls(text):
-            if tc["name"] in ("submit_flag", "flag_found"):
+            if tc["name"] in _FLAG_TOOLS:
                 sub = tc["arguments"].get("flag", tc["arguments"].get("value", ""))
                 if sub.strip() == gt.strip():
                     found = True
                     break
         if not found:
-            flags = extract_flags(text)
-            found = any(f.strip() == gt.strip() for f in flags)
+            has_flag_tool = any(tc["name"] in _FLAG_TOOLS for tc in parse_tool_calls(text))
+            if has_flag_tool:
+                found = any(f.strip() == gt.strip() for f in extract_flags(text))
         rewards.append(1.0 if found else 0.0)
     return rewards
 
 
-def progressive_reward_fn(completions, **kwargs):
-    """Multi-signal: flag(0.40) + format(0.15) + efficiency(0.10) + progression(0.15) + reasoning(0.10) - halluc(0.20)."""
+def online_reward_fn(completions, **kwargs):
+    """Online reward: execute tool calls against live OpenEnv server.
+
+    Parses qwen3_coder XML tool calls from completions, replays them
+    against the OpenEnv /reset + /step endpoints, returns cumulative reward.
+    Falls back to progressive_reward_fn on connection errors.
+    """
+    import urllib.request
+    import urllib.error
+
+    env_url = os.environ.get("OPENENV_URL", "http://localhost:8000")
     gts = kwargs.get("ground_truth", [])
     rewards = []
-
-    recon_tools = {"shell_command", "exec_command", "web_search", "file_search", "grep", "read_file"}
-    flag_tools = {"submit_flag", "flag_found"}
 
     for i, c in enumerate(completions):
         gt = gts[i] if i < len(gts) else ""
         text = completion_to_text(c)
         tcs = parse_tool_calls(text)
-        score = 0.0
 
-        # 1. Flag (0.40)
-        flag_ok = False
-        for tc in tcs:
-            if tc["name"] in flag_tools:
-                sub = tc["arguments"].get("flag", tc["arguments"].get("value", ""))
-                if gt and sub.strip() == gt.strip():
-                    flag_ok = True
-                    break
-        if not flag_ok and gt:
-            flag_ok = any(f.strip() == gt.strip() for f in extract_flags(text))
-        if flag_ok:
-            score += 0.40
+        if not tcs:
+            rewards.append(0.0)
+            continue
 
-        # 2. Format (0.15)
-        if tcs:
-            score += 0.15
-        elif "<tool_call>" in text:
-            score += 0.05
-
-        # 3. Efficiency (0.10) - gamma^n
-        n = max(len(tcs), 1)
-        score += 0.10 * (0.92 ** (n - 1))
-
-        # 4. Progression (0.15)
-        if tcs:
-            names = [tc["name"] for tc in tcs]
-            phases = 0.0
-            third = max(len(names) // 3, 1)
-            if any(n in recon_tools for n in names[:third]):
-                phases += 0.33
-            if len(names) > 1 and any(n in recon_tools | {"python_code", "write_stdin", "apply_patch"} for n in names[third:2*third]):
-                phases += 0.33
-            if any(n in flag_tools for n in names[-third:]):
-                phases += 0.34
-            score += 0.15 * min(phases, 1.0)
-
-        # 5. Reasoning (0.10)
-        if "<think>" in text and "</think>" in text:
-            score += 0.10
-        elif "<think>" in text:
-            score += 0.05
-
-        # 6. Hallucination (-0.20 per bad flag)
-        if gt:
-            bad = sum(
-                1 for tc in tcs
-                if tc["name"] in flag_tools
-                and tc["arguments"].get("flag", tc["arguments"].get("value", "")).strip()
-                and tc["arguments"].get("flag", tc["arguments"].get("value", "")).strip() != gt.strip()
+        try:
+            # Reset environment for this episode
+            req = urllib.request.Request(
+                f"{env_url}/reset",
+                data=json.dumps({}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
             )
-            score -= 0.20 * bad
+            urllib.request.urlopen(req, timeout=10)
+
+            episode_reward = 0.0
+            done = False
+
+            for tc in tcs:
+                name = tc["name"]
+                args = tc.get("arguments", {})
+
+                # Map tool calls to shell commands for RangeAction
+                if name in ("shell_command", "exec_command", "execute_command"):
+                    command = args.get("command", "")
+                elif name in ("submit_flag", "flag_found"):
+                    flag_val = args.get("flag", args.get("value", ""))
+                    command = f"submit_flag {flag_val}"
+                elif name == "python_code":
+                    code = args.get("code", "")
+                    command = f"python3 -c {json.dumps(code)}"
+                elif name == "read_file":
+                    command = f"cat {args.get('path', '')}"
+                elif name == "get_challenge":
+                    command = "get_challenge"
+                elif name == "check_services":
+                    command = "check_services"
+                elif name == "get_progress":
+                    command = "get_progress"
+                elif name == "submit_finding":
+                    command = f"submit_finding {args.get('description', '')}"
+                else:
+                    command = f"{name} {' '.join(str(v) for v in args.values())}"
+
+                if not command.strip():
+                    continue
+
+                step_req = urllib.request.Request(
+                    f"{env_url}/step",
+                    data=json.dumps({"action": {"command": command, "mode": "red"}}).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                resp = urllib.request.urlopen(step_req, timeout=30)
+                data = json.loads(resp.read())
+
+                step_reward = data.get("reward", 0) or 0
+                episode_reward += float(step_reward)
+
+                if data.get("done", False):
+                    done = True
+                    break
+
+            # Bonus noise for variance
+            episode_reward += _reward_rng.uniform(-0.01, 0.01)
+            rewards.append(max(episode_reward, -1.0))
+
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            logger.warning("Online reward failed for sample %d: %s. Falling back.", i, e)
+            # Fall back to offline progressive scoring
+            fallback = progressive_reward_fn([c], ground_truth=[gt])
+            rewards.append(fallback[0])
+
+    return rewards
+
+
+def progressive_reward_fn(completions, **kwargs):
+    """v9 production: flag(0.85) + efficiency(0.10) + format(0.05).
+
+    Physics-inspired efficiency, hallucination energy loss, premature penalty,
+    near-miss tolerance, minimum work gate, noise for variance guarantee.
+    """
+    gts = kwargs.get("ground_truth", [])
+    opt_steps_list = kwargs.get("optimal_steps", [])
+    rewards = []
+
+    for i, c in enumerate(completions):
+        gt = gts[i] if i < len(gts) else ""
+        opt_steps = opt_steps_list[i] if i < len(opt_steps_list) else None
+        text = completion_to_text(c)
+        tcs = parse_tool_calls(text)
+
+        # --- Flag score ---
+        flag_sc = 0.0
+        if gt and is_real_flag(gt):
+            has_flag_tool = False
+            for tc in tcs:
+                if tc["name"] in _FLAG_TOOLS:
+                    has_flag_tool = True
+                    sub = tc["arguments"].get("flag", tc["arguments"].get("value", ""))
+                    if sub.strip() == gt.strip():
+                        flag_sc = 1.0
+                        break
+            if flag_sc < 1.0 and has_flag_tool and gt in text:
+                flag_sc = 1.0
+            if flag_sc < 1.0 and re.search(r"FLAG\{[a-zA-Z0-9_-]+\}", text):
+                flag_sc = 0.1
+
+        # --- Efficiency score (physics-inspired) ---
+        eff_sc = 0.0
+        n_calls = len(tcs)
+        if n_calls >= 3:
+            opt = opt_steps or 10
+            step_ratio = min(opt / n_calls, 1.0)
+            fingerprints = [action_fingerprint(tc) for tc in tcs]
+            novelty = len(set(fingerprints)) / len(fingerprints) if fingerprints else 1.0
+            excess = max(0, n_calls - opt) / max(opt, 1)
+            time_decay = math.exp(-0.3 * excess)
+            eff_sc = step_ratio * novelty * time_decay
+            if flag_sc < 1.0:
+                eff_sc = min(eff_sc, 0.3)
+
+        # --- Format score (known tools only) ---
+        fmt_sc = 0.0
+        if tcs:
+            valid = 0
+            known_count = 0
+            for tc in tcs:
+                if tc.get("name", "") in _KNOWN_TOOL_NAMES:
+                    known_count += 1
+                    args = tc.get("arguments", {})
+                    if isinstance(args, dict) and args:
+                        valid += 1
+                    elif args:
+                        valid += 0.5
+            if known_count > 0:
+                fmt_sc = min(valid / known_count, 1.0)
+
+        # Minimum work gate
+        if n_calls < 3:
+            fmt_sc = min(fmt_sc, 0.3)
+
+        # --- Hallucination penalty (energy loss) ---
+        hall_sc = 0.0
+        if flag_sc < 1.0:
+            for tc in tcs:
+                if tc["name"] in _FLAG_TOOLS:
+                    hall_sc = -0.20
+                    premature_mult = 1.0 + max(0.0, 1.0 - n_calls / 5.0)
+                    hall_sc *= premature_mult
+                    if gt and is_real_flag(gt):
+                        submitted = tc["arguments"].get("flag", tc["arguments"].get("value", ""))
+                        if submitted:
+                            sim = difflib.SequenceMatcher(None, submitted.strip(), gt.strip()).ratio()
+                            if sim >= 0.8:
+                                hall_sc *= 0.1
+                    break
+
+        # Hallucination decays process signals
+        if hall_sc < 0:
+            eff_sc *= 0.3
+            fmt_sc *= 0.3
+
+        # --- Weighted sum ---
+        score = 0.85 * flag_sc + 0.10 * eff_sc + 0.05 * fmt_sc + hall_sc
+        score += _reward_rng.uniform(-0.01, 0.01)
 
         rewards.append(max(score, -1.0))
     return rewards
@@ -225,7 +432,8 @@ def main():
     parser.add_argument("--model", default=MODEL)
     parser.add_argument("--data", default=DATA)
     parser.add_argument("--output", default=OUTPUT)
-    parser.add_argument("--reward", default="progressive", choices=["binary", "progressive", "both"])
+    parser.add_argument("--reward", default="online", choices=["binary", "progressive", "online", "both"])
+    parser.add_argument("--env-url", default="http://localhost:8000", help="OpenEnv server URL for online reward")
     parser.add_argument("--seq", type=int, default=SEQ)
     parser.add_argument("--comp-len", type=int, default=COMP_LEN)
     parser.add_argument("--num-gen", type=int, default=NUM_GEN)
@@ -259,8 +467,8 @@ def main():
     # Import Unsloth
     from unsloth import FastLanguageModel
 
-    # Load model with fast inference
-    logger.info("Loading model with fast_inference=True...")
+    # Load model (no fast_inference — TRL 0.24.0 incompatible with vLLM 0.17.0)
+    logger.info("Loading model (HF generate, no vLLM)...")
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=args.model,
         max_seq_length=args.seq,
@@ -268,7 +476,6 @@ def main():
         load_in_16bit=True,
         full_finetuning=False,
         dtype=None,
-        fast_inference=True,
     )
 
     # Fix tokenizer (Qwen3.5 may return processor)
@@ -283,15 +490,21 @@ def main():
         if not prompt_msgs:
             continue
 
+        gt = r.get("ground_truth_flag", "")
+        if gt and not is_real_flag(gt):
+            logger.warning("Skipped placeholder flag: %s", gt)
+            continue
+
         converted = convert_messages(prompt_msgs)
         try:
             text = tok.apply_chat_template(
                 converted,
+                tools=OPENENV_TOOLS,  # CRITICAL: activates qwen3_coder XML format
                 tokenize=False,
                 add_generation_prompt=True,
             )
             prompts.append(text)
-            ground_truths.append(r.get("ground_truth_flag", ""))
+            ground_truths.append(gt)
         except Exception as e:
             logger.warning("Skipped: %s", e)
 
@@ -326,7 +539,11 @@ def main():
     })
 
     # Select reward
-    if args.reward == "binary":
+    if args.reward == "online":
+        os.environ["OPENENV_URL"] = args.env_url
+        reward_funcs = [online_reward_fn]
+        logger.info("Online reward: %s", args.env_url)
+    elif args.reward == "binary":
         reward_funcs = [binary_reward_fn]
     elif args.reward == "both":
         reward_funcs = [binary_reward_fn, progressive_reward_fn]

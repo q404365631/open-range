@@ -19,6 +19,8 @@ console_router = APIRouter(prefix="/console", tags=["console"])
 # ---------------------------------------------------------------------------
 
 _action_history: list[dict[str, Any]] = []
+_current_snapshot: dict[str, Any] | None = None
+_current_episode: dict[str, Any] | None = None
 _MAX_HISTORY = 50  # keep more than 20 internally, but serve 20
 
 
@@ -109,6 +111,41 @@ def _get_env(request: Request) -> Any:
     if hasattr(app.state, "env"):
         return app.state.env
     raise HTTPException(status_code=503, detail="OpenRange environment is unavailable")
+
+
+def _snapshot_payload(snapshot: Any, state: Any) -> dict[str, Any]:
+    """Render console-safe snapshot metadata."""
+    if snapshot is None:
+        return {"id": None, "tier": None, "hosts": [], "zones": {}, "vuln_count": 0}
+
+    topo = snapshot.topology if isinstance(snapshot.topology, dict) else {}
+    truth_graph = getattr(snapshot, "truth_graph", None)
+    return {
+        "id": getattr(state, "episode_id", None),
+        "tier": topo.get("tier", 1),
+        "hosts": topo.get("hosts", []),
+        "zones": topo.get("zones", {}),
+        "vuln_count": len(truth_graph.vulns) if truth_graph else 0,
+    }
+
+
+def _episode_payload(state: Any) -> dict[str, Any]:
+    """Render console-safe episode state."""
+    if state is None:
+        return {
+            "step_count": 0,
+            "flags_found": 0,
+            "mode": "",
+            "services_status": {},
+        }
+
+    flags_found = getattr(state, "flags_found", [])
+    return {
+        "step_count": getattr(state, "step_count", 0),
+        "flags_found": len(flags_found),
+        "mode": getattr(state, "mode", ""),
+        "services_status": getattr(state, "services_status", {}),
+    }
 
 
 # ---------------------------------------------------------------------------
