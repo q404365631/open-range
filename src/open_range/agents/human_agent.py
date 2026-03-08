@@ -6,7 +6,9 @@ Prints observations to stdout and reads commands from stdin.
 from __future__ import annotations
 
 import sys
-from typing import Literal
+from typing import Any, Literal
+
+from open_range.agents.observation import format_observation
 
 
 class HumanAgent:
@@ -28,9 +30,12 @@ class HumanAgent:
         print(f"Briefing:\n{briefing}", file=sys.stderr)
         print(f"{'=' * 60}\n", file=sys.stderr)
 
-    def act(self, observation: str) -> str:
+    def act(self, observation: Any) -> str:
         """Print the observation and read a command from stdin."""
-        print(f"\n[{self.role.upper()}] Observation:\n{observation}\n", file=sys.stderr)
+        print(
+            f"\n[{self.role.upper()}] Observation:\n{format_observation(observation)}\n",
+            file=sys.stderr,
+        )
         try:
             return input(self.prompt).strip()
         except (EOFError, KeyboardInterrupt):

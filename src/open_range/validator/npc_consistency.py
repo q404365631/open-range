@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from typing import Any
 
 from open_range.protocols import CheckResult, ContainerSet, NPCPersona, SnapshotSpec
 
@@ -74,7 +75,7 @@ class NPCConsistencyCheck:
 
     def __init__(self, model: str | None = None) -> None:
         self.model = model or os.environ.get(
-            "OPENRANGE_NPC_MODEL", "anthropic/claude-haiku-4-5-20251001"
+            "OPENRANGE_NPC_MODEL", "azure/gpt-5.2-codex"
         )
 
     async def check(self, snapshot: SnapshotSpec, containers: ContainerSet) -> CheckResult:
@@ -138,9 +139,9 @@ class NPCConsistencyCheck:
                 )
 
                 try:
-                    response = await litellm.acompletion(
-                        model=self.model,
-                        messages=[
+                    kwargs: dict[str, Any] = {
+                        "model": self.model,
+                        "messages": [
                             {"role": "system", "content": NPC_CONSISTENCY_PROMPT},
                             {
                                 "role": "user",
@@ -155,9 +156,12 @@ class NPCConsistencyCheck:
                                 }),
                             },
                         ],
-                        response_format={"type": "json_object"},
-                        temperature=0.0,
-                    )
+                        "response_format": {"type": "json_object"},
+                    }
+                    # Codex models don't support temperature
+                    if "codex" not in self.model.lower():
+                        kwargs["temperature"] = 0.0
+                    response = await litellm.acompletion(**kwargs)
 
                     raw = json.loads(response.choices[0].message.content)
                     action = raw.get("action", "ignore").lower().strip()

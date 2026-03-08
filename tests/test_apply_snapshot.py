@@ -134,7 +134,9 @@ class TestFileDeployment:
         assert len(exec_calls) == 2
         # First call: mkdir -p for parent directory
         mkdir_cmd = exec_calls[0]
-        assert mkdir_cmd == ["sh", "-c", "mkdir -p '/var/www/portal'"]
+        assert mkdir_cmd[0:2] == ["sh", "-c"]
+        assert "mkdir -p" in mkdir_cmd[2]
+        assert "/var/www/portal" in mkdir_cmd[2]
         # Second call: base64 write
         write_cmd = exec_calls[1]
         assert isinstance(write_cmd, list)

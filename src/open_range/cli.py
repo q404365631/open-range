@@ -130,7 +130,7 @@ def cli(verbose: bool) -> None:
 @cli.command()
 @click.option("-m", "--manifest", required=True, type=click.Path(exists=True), help="Path to manifest YAML.")
 @click.option("-o", "--output", default="./snapshots", type=click.Path(), help="Output directory for snapshot.")
-@click.option("--model", default=None, help="LLM model (default: $OPENRANGE_BUILDER_MODEL or azure/gpt-5.2).")
+@click.option("--model", default=None, help="LLM model (default: $OPENRANGE_BUILDER_MODEL or azure/gpt-5.2-codex).")
 @click.option("--tier", default=1, type=click.IntRange(1, 5), help="Tier level 1-5.")
 @click.option("--seed", default=None, type=int, help="Random seed for reproducibility.")
 @click.option("--template-only", is_flag=True, default=False, help="Skip LLM, use deterministic template builder.")
@@ -159,7 +159,7 @@ def build(
         builder = TemplateOnlyBuilder()
         click.echo(f"Building snapshot (template-only, tier {tier}) ...")
     else:
-        resolved_model = model or os.environ.get("OPENRANGE_BUILDER_MODEL", "azure/gpt-5.2")
+        resolved_model = model or os.environ.get("OPENRANGE_BUILDER_MODEL", "azure/gpt-5.2-codex")
         builder = LLMSnapshotBuilder(model=resolved_model, max_tokens=max_tokens)
         click.echo(f"Building snapshot (model={resolved_model}, tier {tier}) ...")
 

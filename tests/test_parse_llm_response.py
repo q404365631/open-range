@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from open_range.builder.builder import _parse_llm_response
+from open_range.builder.builder import SnapshotParseError, _parse_llm_response
 from open_range.protocols import (
     EvidenceItem,
     ExploitStep,
@@ -778,25 +778,24 @@ class TestMalformedInput:
 
     def test_json_array_not_object_raises(self):
         """Top-level must be an object, not an array."""
-        with pytest.raises((TypeError, AttributeError)):
+        with pytest.raises((TypeError, AttributeError, SnapshotParseError)):
             _parse_llm_response("[1, 2, 3]")
 
     def test_json_string_not_object_raises(self):
-        with pytest.raises((TypeError, AttributeError)):
+        with pytest.raises((TypeError, AttributeError, SnapshotParseError)):
             _parse_llm_response('"just a string"')
 
     def test_truth_graph_not_dict_handled(self):
-        """If truth_graph is a non-dict, .get() calls should fail gracefully."""
+        """If truth_graph is a non-dict, parsing should fail gracefully."""
         # truth_graph as string
         raw = json.dumps({"truth_graph": "not a dict"})
-        # This will try .get() on a string, which fails
-        with pytest.raises(AttributeError):
+        with pytest.raises((AttributeError, SnapshotParseError)):
             _parse_llm_response(raw)
 
     def test_golden_path_not_list_handled(self):
-        """If golden_path is a non-list iterable (e.g. string), .get() on items fails."""
+        """If golden_path is a non-list, parsing should fail gracefully."""
         raw = json.dumps({"golden_path": "not a list"})
-        with pytest.raises(AttributeError):
+        with pytest.raises((AttributeError, SnapshotParseError)):
             _parse_llm_response(raw)
 
     def test_empty_string_raises(self):

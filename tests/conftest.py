@@ -177,6 +177,7 @@ def mock_containers():
         def __init__(self):
             self.exec_results = {}  # {(container, cmd_fragment): output}
             self.healthy = set()
+            self.restarted = []  # track restart calls: list of container names
 
         async def exec(self, container: str, cmd: str, **kwargs) -> str:
             for (c, pattern), result in self.exec_results.items():
@@ -189,5 +190,8 @@ def mock_containers():
 
         async def cp(self, container, src, dest):
             pass
+
+        async def restart(self, container: str, **kwargs) -> None:
+            self.restarted.append(container)
 
     return MockContainerSet()

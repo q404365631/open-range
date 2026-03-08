@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from open_range.protocols import CheckResult, ContainerSet, SnapshotSpec
 
+# Common service ports to probe for zone isolation violations.
+_PROBE_PORTS = (22, 80, 443, 3306, 445, 389, 636, 8080)
+
 
 class IsolationCheck:
     """Verify:
-    1. Attacker cannot directly reach internal/management zones.
+    1. Attacker cannot directly reach internal/management zones on any common port.
     2. Task briefings do not contain flag values or golden-path commands.
     """
 
@@ -27,16 +30,24 @@ class IsolationCheck:
                 continue
             for target in hosts:
                 target_name = target if isinstance(target, str) else target.get("name", "")
-                try:
-                    # Quick connectivity probe (TCP, 2s timeout).
-                    output = await containers.exec(
-                        attacker_host,
-                        f"timeout 2 bash -c 'echo > /dev/tcp/{target_name}/22' 2>&1 || echo BLOCKED",
+                open_ports: list[int] = []
+                for port in _PROBE_PORTS:
+                    try:
+                        output = await containers.exec(
+                            attacker_host,
+                            f"timeout 2 bash -c 'echo > /dev/tcp/{target_name}/{port}' "
+                            f"2>/dev/null && echo OPEN || echo CLOSED",
+                        )
+                        if "OPEN" in output:
+                            open_ports.append(port)
+                    except Exception:  # noqa: BLE001
+                        pass  # exec failure means unreachable — that is fine
+                if open_ports:
+                    ports_str = ", ".join(str(p) for p in open_ports)
+                    issues.append(
+                        f"attacker can reach {target_name} in {zone_name} "
+                        f"on port(s) {ports_str}"
                     )
-                    if "BLOCKED" not in output and "timed out" not in output.lower():
-                        issues.append(f"attacker can reach {target_name} in {zone_name}")
-                except Exception:  # noqa: BLE001
-                    pass  # exec failure means unreachable — that is fine
 
         # --- Briefing leakage -------------------------------------------------
         flag_values = [f.value for f in snapshot.flags]

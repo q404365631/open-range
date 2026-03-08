@@ -55,7 +55,7 @@ class RunnerAgent(Protocol):
     def reset(self, briefing: str, role: str) -> None:
         ...
 
-    def act(self, observation: str) -> str:
+    def act(self, observation: Any) -> str:
         ...
 
 
@@ -227,7 +227,7 @@ class CurriculumRunner:
         while not done and step < self.config.max_steps:
             # Red turn
             try:
-                red_cmd = self.red.act(getattr(obs, "stdout", str(obs)))
+                red_cmd = self.red.act(obs)
                 obs = self.env.step(RangeAction(command=red_cmd, mode="red"))
                 total_reward += getattr(obs, "reward", 0.0) or 0.0
                 step += 1
@@ -241,7 +241,7 @@ class CurriculumRunner:
 
             # Blue turn
             try:
-                blue_cmd = self.blue.act(getattr(obs, "stdout", str(obs)))
+                blue_cmd = self.blue.act(obs)
                 obs = self.env.step(RangeAction(command=blue_cmd, mode="blue"))
                 total_reward += getattr(obs, "reward", 0.0) or 0.0
                 step += 1

@@ -16,7 +16,9 @@ Design:
 from __future__ import annotations
 
 import logging
+import os
 import shlex
+import subprocess as sp
 import time
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -95,6 +97,7 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         max_steps: int = DEFAULT_MAX_STEPS,
         exec_timeout: float = EXEC_TIMEOUT,
         docker_available: bool | None = None,
+        execution_mode: str = "auto",
     ) -> None:
         if _HAS_OPENENV:
             super().__init__()
@@ -117,6 +120,22 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         self._docker_available = docker_available
         self._runtime = runtime
         self._episode_recorded = False
+
+        # Execution mode: "auto", "docker", or "subprocess"
+        self._execution_mode = execution_mode
+        if execution_mode == "auto":
+            env_mode = os.environ.get("OPENRANGE_EXECUTION_MODE", "")
+            if env_mode:
+                self._execution_mode = env_mode
+            elif docker_available is False:
+                # Explicit docker_available=False (unit tests) → mock mode,
+                # NOT subprocess. Keep execution_mode as "auto" so
+                # _exec_in_container falls through to mock.
+                self._execution_mode = "docker"
+            elif self._get_docker() is not None:
+                self._execution_mode = "docker"
+            else:
+                self._execution_mode = "subprocess"
 
     # -----------------------------------------------------------------
     # Docker helpers
@@ -168,20 +187,51 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
 
         return host
 
+    def _exec_via_subprocess(self, host: str, command: str, timeout: float = 30.0) -> tuple[str, str]:
+        """Execute a command via local subprocess (all-in-one container mode).
+
+        All services run locally. Commands execute directly via bash.
+        The host parameter is used for logging but commands run on localhost.
+        """
+        try:
+            result = sp.run(
+                ["bash", "-c", command],
+                capture_output=True,
+                timeout=timeout,
+                text=True,
+            )
+            return result.stdout, result.stderr
+        except sp.TimeoutExpired:
+            return "", f"Command timed out after {timeout}s"
+        except Exception as exc:
+            return "", f"Execution error: {exc}"
+
     def _exec_in_container(
         self, container_name: str, command: str
     ) -> tuple[str, str]:
         """Execute a command inside a Docker container.
 
-        Returns (stdout, stderr). Falls back to a stub when Docker is
-        unavailable (e.g. during unit tests).
+        Returns (stdout, stderr). Routes based on execution_mode:
+        - "subprocess": runs via local bash
+        - "docker": runs via Docker SDK
+        - Falls back to mock when docker_available is explicitly False
+          (unit test backward compatibility).
         """
-        client = self._get_docker()
-        if client is None:
+        # Subprocess execution mode
+        if self._execution_mode == "subprocess":
+            return self._exec_via_subprocess(container_name, command, self._exec_timeout)
+
+        # Mock mode for unit tests (docker_available explicitly set to False)
+        if self._docker_available is False:
             return (
                 f"[mock] executed on {container_name}: {command}",
                 "",
             )
+
+        # Docker execution mode
+        client = self._get_docker()
+        if client is None:
+            return "", "Docker unavailable and execution_mode is not 'subprocess'"
         try:
             container = client.containers.get(container_name)
             result = container.exec_run(
@@ -204,7 +254,14 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
         Parses the ``files`` dict from the snapshot spec. Keys use the format
         ``<container>:<path>`` for file deployments and ``db:sql`` for SQL
         statements. Creates parent directories as needed.
+
+        In subprocess mode, files are written directly to disk and SQL is
+        executed via the local ``mysql`` CLI.
         """
+        if self._execution_mode == "subprocess":
+            self._apply_snapshot_subprocess(snapshot)
+            return
+
         client = self._get_docker()
         if client is None:
             logger.info("Docker unavailable — skipping snapshot application")
@@ -268,6 +325,67 @@ class RangeEnvironment(_BASE):  # type: ignore[misc]
 
         logger.info(
             "Snapshot application complete: %d/%d artifacts deployed",
+            deployed, len(snapshot.files),
+        )
+
+    def _apply_snapshot_subprocess(self, snapshot: SnapshotSpec) -> None:
+        """Deploy snapshot artifacts directly to the local filesystem.
+
+        Used in subprocess execution mode where all services run locally.
+        SQL statements are written to a temp file and executed via ``mysql`` CLI.
+        Regular files are written directly to their target paths.
+        """
+        if not snapshot.files:
+            logger.info("No files in snapshot to deploy")
+            return
+
+        import tempfile
+
+        deployed = 0
+        for key, content in snapshot.files.items():
+            try:
+                if key == "db:sql":
+                    # Write SQL to temp file, execute via mysql CLI
+                    with tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".sql", delete=False
+                    ) as tmp:
+                        tmp.write(content)
+                        tmp_path = tmp.name
+                    try:
+                        _, stderr = self._exec_via_subprocess(
+                            "db",
+                            f"mysql -u root -pr00tP@ss! < {shlex.quote(tmp_path)}",
+                            timeout=self._exec_timeout,
+                        )
+                        if stderr and "ERROR" in stderr:
+                            logger.warning("SQL deployment error: %s", stderr)
+                        else:
+                            deployed += 1
+                            logger.info("Deployed SQL to db (subprocess)")
+                    finally:
+                        os.unlink(tmp_path)
+                    continue
+
+                if ":" not in key:
+                    logger.warning("Skipping file with bad key format: %s", key)
+                    continue
+
+                _container, path = key.split(":", 1)
+
+                # Create parent directory and write file directly
+                parent_dir = os.path.dirname(path) if os.path.dirname(path) else "/"
+                os.makedirs(parent_dir, exist_ok=True)
+
+                with open(path, "w") as f:
+                    f.write(content)
+                deployed += 1
+                logger.info("Deployed file (subprocess): %s:%s", _container, path)
+
+            except Exception as exc:
+                logger.warning("Failed to deploy %s: %s", key, exc)
+
+        logger.info(
+            "Snapshot application complete (subprocess): %d/%d artifacts deployed",
             deployed, len(snapshot.files),
         )
 

@@ -140,7 +140,7 @@ class LLMSnapshotOutput(BaseModel):
     npc_personas: list[_LLMNPCPersona] = Field(default_factory=list)
     npc_traffic: dict[str, Any] = Field(default_factory=dict)
     task: _LLMTask = Field(default_factory=_LLMTask)
-    files: dict[str, str] = Field(default_factory=dict)
+    files: dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -152,14 +152,14 @@ class LLMSnapshotBuilder:
     """Generate snapshot specs via LiteLLM.
 
     Reads model from ``OPENRANGE_BUILDER_MODEL`` env var.
-    Default: ``anthropic/claude-sonnet-4-20250514``.
+    Default: ``azure/gpt-5.2-codex``.
     """
 
     def __init__(
         self,
         model: str | None = None,
         prompt_template: str | None = None,
-        temperature: float = 0.7,
+        temperature: float | None = 0.7,
         max_retries: int = 3,
         max_tokens: int = 32768,
         timeout: float = 120.0,
@@ -167,18 +167,23 @@ class LLMSnapshotBuilder:
         """Initialize the LLM-based snapshot builder.
 
         Args:
-            model: LiteLLM model identifier (e.g. 'azure/gpt-5.2').
+            model: LiteLLM model identifier (e.g. 'azure/gpt-5.2-codex').
             prompt_template: System prompt override.
-            temperature: Sampling temperature for LLM calls.
+            temperature: Sampling temperature for LLM calls. None to omit
+                (required for codex models which don't support temperature).
             max_retries: Maximum number of LLM call + parse attempts.
             max_tokens: Maximum tokens in LLM response.
             timeout: Timeout in seconds for each LLM call.
         """
         self.model = model or os.environ.get(
-            "OPENRANGE_BUILDER_MODEL", "anthropic/claude-sonnet-4-20250514"
+            "OPENRANGE_BUILDER_MODEL", "azure/gpt-5.2-codex"
         )
         self.prompt_template = prompt_template or BUILDER_SYSTEM_PROMPT
-        self.temperature = temperature
+        # Codex models don't support temperature; auto-set to None
+        if temperature is not None and "codex" in self.model.lower():
+            self.temperature = None
+        else:
+            self.temperature = temperature
         self.max_retries = max_retries
         self.max_tokens = max_tokens
         self.timeout = timeout
@@ -434,16 +439,17 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
     )
 
     # Map golden_path -- LLM uses "cmd"/"expect_stdout", protocol uses "command"/"expect_in_stdout"
+    # When both are present, 'cmd' takes precedence (LLM prompt uses 'cmd')
     golden_path = []
     for i, step in enumerate(llm_output.golden_path):
-        command = step.command or step.cmd
-        expect = step.expect_in_stdout or step.expect_stdout
-        if not command and step.cmd:
+        command = step.cmd or step.command
+        expect = step.expect_stdout or step.expect_in_stdout
+        if step.cmd and not step.command:
             logger.warning(
                 "golden_path[%d]: used 'cmd' fallback for 'command'",
                 i,
             )
-        if not step.expect_in_stdout and step.expect_stdout:
+        if step.expect_stdout and not step.expect_in_stdout:
             logger.warning(
                 "golden_path[%d]: used 'expect_stdout' fallback for 'expect_in_stdout'",
                 i,
@@ -453,6 +459,7 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
                 step=step.step,
                 command=command,
                 expect_in_stdout=expect,
+                host=step.host or "attacker",
                 description=step.description,
             )
         )
@@ -949,8 +956,10 @@ class TemplateOnlyBuilder:
                 zones.setdefault(z, []).append(h["name"])
 
         topology = {
+            "tier": int(manifest.get("tier", context.tier) or context.tier),
             "hosts": hosts,
             "zones": zones,
+            "difficulty": manifest.get("difficulty", {}),
             "users": [
                 {
                     "username": "admin",
