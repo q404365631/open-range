@@ -112,7 +112,7 @@ Validator profile matrix:
 Managed runtime defaults and safety behavior:
 - `OPENRANGE_RUNTIME_VALIDATOR_PROFILE` defaults to `training`.
 - `OPENRANGE_ENABLE_LIVE_ADMISSION` defaults to `1`.
-- If managed runtime is configured non-live (`offline` profile and/or live admission disabled), startup raises an error unless you explicitly opt out with `OPENRANGE_ALLOW_NON_LIVE_ADMISSION=1`, in which case a warning is emitted.
+- If managed runtime is configured non-live (`offline` profile and/or live admission disabled), startup raises an error unless you explicitly opt out with `OPENRANGE_ALLOW_NON_LIVE_ADMISSION=1` (legacy alias: `OPENRANGE_ALLOW_OFFLINE_ADMISSION=1`), in which case a warning is emitted.
 
 **Environment** — `RangeEnvironment(Environment)` following the OpenEnv contract. `reset()` asks the shared runtime for a frozen admitted snapshot. `step(action)` routes commands to the appropriate container — Red runs on the attacker box, Blue runs on the SIEM. No artificial command allowlists; the container's installed tools are the constraint.
 
