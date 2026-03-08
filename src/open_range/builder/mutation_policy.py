@@ -34,6 +34,13 @@ class PopulationMutationPolicy:
     """
 
     name = "population_guided_v1"
+    _STRUCTURAL_OPS = {
+        "add_service",
+        "add_user",
+        "add_dependency_edge",
+        "add_trust_edge",
+    }
+    _SECURITY_OPS = {"seed_vuln", "add_benign_noise"}
 
     def select_parent(
         self,
@@ -165,20 +172,26 @@ class PopulationMutationPolicy:
         if structural is not None:
             selected.append(structural)
 
-        security_pool = [
-            choice
-            for choice in (
-                self._select_candidate(
-                    security_candidates,
-                    snapshot=snapshot,
-                    context=context,
-                    rng=rng,
-                ),
-            )
-            if choice is not None
-        ]
-        selected.extend(security_pool)
+        security = self._select_candidate(
+            security_candidates,
+            snapshot=snapshot,
+            context=context,
+            rng=rng,
+        )
+        if security is not None:
+            selected.append(security)
 
+        # Best-effort deterministic fallbacks when only one category exists.
+        if not selected and structural_candidates:
+            fallback = self._select_candidate(
+                structural_candidates,
+                snapshot=snapshot,
+                context=context,
+                rng=rng,
+                deterministic=True,
+            )
+            if fallback is not None:
+                selected.append(fallback)
         if not selected and security_candidates:
             fallback = self._select_candidate(
                 security_candidates,
@@ -189,18 +202,6 @@ class PopulationMutationPolicy:
             )
             if fallback is not None:
                 selected.append(fallback)
-
-        if not structural and len(security_candidates) > 1:
-            ranked = self._rank_candidates(
-                security_candidates,
-                snapshot=snapshot,
-                context=context,
-            )
-            for choice in ranked:
-                if any(choice.op.mutation_id == existing.op.mutation_id for existing in selected):
-                    continue
-                selected.append(choice)
-                break
 
         ops = [choice.op for choice in selected]
         if not ops:

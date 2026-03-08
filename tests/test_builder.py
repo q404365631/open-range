@@ -67,6 +67,22 @@ async def test_template_builder_respects_bug_families(tier1_manifest):
 
 
 @pytest.mark.asyncio
+async def test_template_builder_clamps_min_vulns_to_candidate_pool(tier1_manifest):
+    from open_range.builder.builder import TemplateOnlyBuilder
+
+    builder = TemplateOnlyBuilder()
+    manifest = {
+        **tier1_manifest,
+        "bug_families": ["sqli"],
+        "difficulty": {**tier1_manifest.get("difficulty", {}), "min_vulns": 2, "max_vulns": 2},
+    }
+
+    spec = await builder.build(manifest, BuildContext(seed=7, tier=1))
+    assert len(spec.truth_graph.vulns) == 1
+    assert all(v.type == "sqli" for v in spec.truth_graph.vulns)
+
+
+@pytest.mark.asyncio
 async def test_template_builder_avoids_previous_vulns(tier1_manifest):
     from open_range.builder.builder import TemplateOnlyBuilder
 
@@ -278,6 +294,80 @@ async def test_mutator_seed_vuln_adds_flag_task_path_and_payloads(tier1_manifest
     assert any(path_vulns[-1].injection_point in step.command for step in child.golden_path)
     assert "web:/var/www/portal/download.php" in child.files
     assert new_flag.value in child.files["web:/var/www/portal/download.php"]
+
+
+@pytest.mark.asyncio
+async def test_mutator_fails_fast_on_illegal_seed_vuln_family(tier1_manifest):
+    from open_range.builder.builder import TemplateOnlyBuilder
+    from open_range.builder.mutator import Mutator
+    from open_range.protocols import MutationOp, MutationPlan
+
+    mutator = Mutator(TemplateOnlyBuilder())
+    parent = await mutator.mutate(tier1_manifest, context=BuildContext(seed=1, tier=1))
+
+    def forced_plan(**kwargs):
+        return MutationPlan(
+            parent_snapshot_id="root_snap",
+            ops=[
+                MutationOp(
+                    mutation_id="seed_bad_family",
+                    op_type="seed_vuln",
+                    target_selector={"host": "web"},
+                    params={"vuln_type": "totally_fake_bug", "required_services": ["nginx"]},
+                )
+            ],
+        )
+
+    def should_not_apply(*args, **kwargs):  # pragma: no cover - assertion path
+        raise AssertionError("_apply_plan should not run for illegal mutation plans")
+
+    mutator._plan_mutations = forced_plan  # type: ignore[method-assign]
+    mutator._apply_plan = should_not_apply  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="illegal family"):
+        await mutator.mutate(
+            tier1_manifest,
+            context=BuildContext(seed=2, tier=1),
+            parent_snapshot=parent,
+            parent_snapshot_id="root_snap",
+        )
+
+
+@pytest.mark.asyncio
+async def test_mutator_fails_fast_on_illegal_add_service_target(tier1_manifest):
+    from open_range.builder.builder import TemplateOnlyBuilder
+    from open_range.builder.mutator import Mutator
+    from open_range.protocols import MutationOp, MutationPlan
+
+    mutator = Mutator(TemplateOnlyBuilder())
+    parent = await mutator.mutate(tier1_manifest, context=BuildContext(seed=1, tier=1))
+
+    def forced_plan(**kwargs):
+        return MutationPlan(
+            parent_snapshot_id="root_snap",
+            ops=[
+                MutationOp(
+                    mutation_id="add_bad_service",
+                    op_type="add_service",
+                    target_selector={"host": "web"},
+                    params={"service": "totally_fake_service"},
+                )
+            ],
+        )
+
+    def should_not_apply(*args, **kwargs):  # pragma: no cover - assertion path
+        raise AssertionError("_apply_plan should not run for illegal mutation plans")
+
+    mutator._plan_mutations = forced_plan  # type: ignore[method-assign]
+    mutator._apply_plan = should_not_apply  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="illegal service"):
+        await mutator.mutate(
+            tier1_manifest,
+            context=BuildContext(seed=2, tier=1),
+            parent_snapshot=parent,
+            parent_snapshot_id="root_snap",
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -288,6 +288,7 @@ class Mutator:
             context=context,
             rng=rng,
         )
+        self._validate_plan_legality(manifest, plan)
         self._apply_plan(child, plan, manifest, context)
         child.files = render_template_payloads(child, manifest=manifest)
 
@@ -359,6 +360,89 @@ class Mutator:
             policy_score=policy_score,
             score_breakdown=score_breakdown,
         )
+
+    def _validate_plan_legality(
+        self,
+        manifest: dict[str, Any],
+        plan: MutationPlan,
+    ) -> None:
+        manifest_hosts = _manifest_hosts(manifest)
+        allowed_bug_families = {str(v) for v in manifest.get("bug_families", []) if str(v)}
+        allowed_users = _manifest_users(manifest)
+        allowed_principals = _manifest_principals(manifest)
+        allowed_services = _manifest_services(manifest)
+        allowed_dependency_edges = _manifest_dependency_edges(manifest)
+        allowed_trust_edges = _manifest_trust_edges(manifest)
+
+        for op in plan.ops:
+            prefix = f"Illegal mutation op {op.mutation_id!r} ({op.op_type})"
+            if op.op_type not in _SUPPORTED_MUTATION_OPS:
+                raise ValueError(f"{prefix}: unsupported op_type")
+
+            if op.op_type == "add_service":
+                host = op.target_selector.get("host", "")
+                service = str(op.params.get("service", "")).strip()
+                if host not in manifest_hosts:
+                    raise ValueError(f"{prefix}: add_service targets unknown host {host!r}")
+                if service and service not in allowed_services.get(host, frozenset()):
+                    raise ValueError(
+                        f"{prefix}: add_service introduces illegal service {service!r} on {host!r}"
+                    )
+
+            elif op.op_type == "add_user":
+                username = str(op.params.get("username", "")).strip()
+                if username and username not in allowed_users:
+                    raise ValueError(
+                        f"{prefix}: add_user introduces unknown manifest user {username!r}"
+                    )
+
+            elif op.op_type == "add_dependency_edge":
+                source = op.target_selector.get("source", "")
+                target = op.target_selector.get("target", "")
+                if (source, target) not in allowed_dependency_edges:
+                    raise ValueError(
+                        f"{prefix}: add_dependency_edge introduces illegal edge {source!r}->{target!r}"
+                    )
+
+            elif op.op_type == "add_trust_edge":
+                source = op.target_selector.get("source", "")
+                target = op.target_selector.get("target", "")
+                edge_type = str(op.params.get("type", "")).strip()
+                if source and source not in allowed_principals:
+                    raise ValueError(
+                        f"{prefix}: add_trust_edge introduces unknown principal {source!r}"
+                    )
+                if target and target not in allowed_principals:
+                    raise ValueError(
+                        f"{prefix}: add_trust_edge introduces unknown principal {target!r}"
+                    )
+                if (source, target, edge_type) not in allowed_trust_edges:
+                    raise ValueError(
+                        f"{prefix}: add_trust_edge introduces illegal edge "
+                        f"{source!r}->{target!r} ({edge_type!r})"
+                    )
+
+            elif op.op_type == "seed_vuln":
+                host = op.target_selector.get("host", "")
+                vuln_type = str(op.params.get("vuln_type", "")).strip()
+                required_services = {
+                    str(service).strip()
+                    for service in op.params.get("required_services", [])
+                    if str(service).strip()
+                }
+                if host not in manifest_hosts:
+                    raise ValueError(f"{prefix}: seed_vuln targets unknown host {host!r}")
+                if vuln_type and vuln_type not in allowed_bug_families:
+                    raise ValueError(
+                        f"{prefix}: seed_vuln uses illegal family {vuln_type!r}"
+                    )
+                if required_services:
+                    host_services = allowed_services.get(host, frozenset())
+                    if not required_services.intersection(host_services):
+                        raise ValueError(
+                            f"{prefix}: seed_vuln host {host!r} incompatible with required "
+                            f"services {sorted(required_services)}"
+                        )
 
     def _candidate_add_service(
         self,
@@ -784,6 +868,86 @@ class Mutator:
         if isinstance(raw_pool, list) and raw_pool:
             return raw_pool
         return TemplateOnlyBuilder().vuln_pool
+
+
+def _manifest_hosts(manifest: dict[str, Any]) -> set[str]:
+    hosts: set[str] = set()
+    for raw in manifest.get("topology", {}).get("hosts", []):
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name", "")).strip()
+        if name:
+            hosts.add(name)
+    return hosts
+
+
+def _manifest_users(manifest: dict[str, Any]) -> set[str]:
+    users: set[str] = set()
+    for raw in manifest.get("users", []):
+        if not isinstance(raw, dict):
+            continue
+        username = str(raw.get("username", "")).strip()
+        if username:
+            users.add(username)
+    return users
+
+
+def _manifest_principals(manifest: dict[str, Any]) -> set[str]:
+    principals = set(_manifest_users(manifest))
+    for raw in manifest.get("trust_relationships", []):
+        if not isinstance(raw, dict):
+            continue
+        source = str(raw.get("source") or raw.get("from") or "").strip()
+        target = str(raw.get("target") or raw.get("to") or "").strip()
+        if source:
+            principals.add(source)
+        if target:
+            principals.add(target)
+    return principals
+
+
+def _manifest_services(manifest: dict[str, Any]) -> dict[str, frozenset[str]]:
+    services: dict[str, frozenset[str]] = {}
+    for raw in manifest.get("topology", {}).get("hosts", []):
+        if not isinstance(raw, dict):
+            continue
+        host = str(raw.get("name", "")).strip()
+        if not host:
+            continue
+        raw_services = raw.get("services", [])
+        if not isinstance(raw_services, list):
+            raw_services = []
+        services[host] = frozenset(str(service).strip() for service in raw_services if str(service).strip())
+    return services
+
+
+def _manifest_dependency_edges(manifest: dict[str, Any]) -> set[tuple[str, str]]:
+    edges: set[tuple[str, str]] = set()
+    for raw in manifest.get("topology", {}).get("hosts", []):
+        if not isinstance(raw, dict):
+            continue
+        source = str(raw.get("name", "")).strip()
+        raw_targets = raw.get("connects_to", [])
+        if not source or not isinstance(raw_targets, list):
+            continue
+        for raw_target in raw_targets:
+            target = str(raw_target).strip()
+            if target:
+                edges.add((source, target))
+    return edges
+
+
+def _manifest_trust_edges(manifest: dict[str, Any]) -> set[tuple[str, str, str]]:
+    edges: set[tuple[str, str, str]] = set()
+    for raw in manifest.get("trust_relationships", []):
+        if not isinstance(raw, dict):
+            continue
+        source = str(raw.get("source") or raw.get("from") or "").strip()
+        target = str(raw.get("target") or raw.get("to") or "").strip()
+        edge_type = str(raw.get("type", "")).strip()
+        if source and target:
+            edges.add((source, target, edge_type))
+    return edges
 
 
 def _ensure_mutable_topology(
