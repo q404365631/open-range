@@ -59,7 +59,11 @@ from open_range.validator.validator import ValidationResult, ValidatorGate
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MANIFEST = ("manifests", "tier1_basic.yaml")
-_DEFAULT_VALIDATOR_PROFILE = "training"
+_DEFAULT_MANAGED_VALIDATOR_PROFILE = "training"
+_DEFAULT_MANAGED_LIVE_ADMISSION = True
+_ALLOW_NON_LIVE_ADMISSION_ENV = "OPENRANGE_ALLOW_NON_LIVE_ADMISSION"
+_ALLOW_OFFLINE_ADMISSION_ENV = "OPENRANGE_ALLOW_OFFLINE_ADMISSION"
+_DEFAULT_VALIDATOR_PROFILE = _DEFAULT_MANAGED_VALIDATOR_PROFILE
 _VALIDATOR_PROFILE_ALIASES = {
     "light": "offline",
     "static": "offline",
@@ -67,7 +71,6 @@ _VALIDATOR_PROFILE_ALIASES = {
     "strict": "training",
 }
 _LIVE_VALIDATOR_PROFILES = {"training"}
-_ALLOW_OFFLINE_ADMISSION_ENV = "OPENRANGE_ALLOW_OFFLINE_ADMISSION"
 _PERSISTED_SNAPSHOT_VALIDATION_ALIASES = {
     "none": "trust",
     "disabled": "trust",
@@ -89,6 +92,21 @@ def _env_int(name: str, default: int) -> int:
     if raw is None or raw.strip() == "":
         return default
     return int(raw)
+
+
+def _non_live_opt_out_enabled() -> bool:
+    return _env_flag(_ALLOW_NON_LIVE_ADMISSION_ENV, default=False) or _env_flag(
+        _ALLOW_OFFLINE_ADMISSION_ENV,
+        default=False,
+    )
+
+
+def _non_live_opt_out_env_name() -> str | None:
+    if _env_flag(_ALLOW_NON_LIVE_ADMISSION_ENV, default=False):
+        return _ALLOW_NON_LIVE_ADMISSION_ENV
+    if _env_flag(_ALLOW_OFFLINE_ADMISSION_ENV, default=False):
+        return _ALLOW_OFFLINE_ADMISSION_ENV
+    return None
 
 
 def _candidate_roots() -> list[Path]:
@@ -377,6 +395,19 @@ def _build_validator(profile: str, manifest: dict[str, Any]) -> ValidatorGate:
     )
 
 
+def _strict_admission_enabled(profile: str, live_admission_enabled: bool) -> bool:
+    return profile in _LIVE_VALIDATOR_PROFILES and live_admission_enabled
+
+
+def _managed_admission_failure_message(profile: str, live_admission_enabled: bool) -> str:
+    return (
+        "Managed runtime requires strict live admission "
+        f"(validator_profile='training', live_admission_enabled=1). "
+        f"Current configuration: validator_profile={profile!r}, "
+        f"live_admission_enabled={live_admission_enabled!r}."
+    )
+
+
 def _default_live_validator(*, include_patchability: bool = False) -> ValidatorGate:
     checks = [
         BuildBootCheck(),
@@ -428,7 +459,7 @@ class ManagedSnapshotRuntime:
         self.mutation_policy = mutation_policy or PopulationMutationPolicy()
         self.mutator = Mutator(self.builder, policy=self.mutation_policy)
         self.allow_insecure_offline_profile = (
-            _env_flag(_ALLOW_OFFLINE_ADMISSION_ENV, default=False)
+            _non_live_opt_out_enabled()
             if allow_insecure_offline_profile is None
             else bool(allow_insecure_offline_profile)
         )
@@ -474,27 +505,42 @@ class ManagedSnapshotRuntime:
 
     @classmethod
     def from_env(cls) -> "ManagedSnapshotRuntime":
+        profile = _normalize_validator_profile(
+            os.getenv(
+                "OPENRANGE_RUNTIME_VALIDATOR_PROFILE",
+                _DEFAULT_MANAGED_VALIDATOR_PROFILE,
+            )
+        )
+        live_admission_enabled = _env_flag(
+            "OPENRANGE_ENABLE_LIVE_ADMISSION",
+            default=_DEFAULT_MANAGED_LIVE_ADMISSION,
+        )
+        if not _strict_admission_enabled(profile, live_admission_enabled):
+            message = _managed_admission_failure_message(profile, live_admission_enabled)
+            opt_out_env = _non_live_opt_out_env_name()
+            if opt_out_env:
+                logger.warning(
+                    "%s Explicit opt-out enabled via %s=1.",
+                    message,
+                    opt_out_env,
+                )
+            else:
+                raise RuntimeError(
+                    f"{message} Set {_ALLOW_NON_LIVE_ADMISSION_ENV}=1 to explicitly opt out."
+                )
+
         return cls(
             manifest_path=os.getenv("OPENRANGE_RUNTIME_MANIFEST"),
             store_dir=os.getenv("OPENRANGE_SNAPSHOT_DIR"),
-            validator_profile=os.getenv(
-                "OPENRANGE_RUNTIME_VALIDATOR_PROFILE",
-                _DEFAULT_VALIDATOR_PROFILE,
-            ),
-            allow_insecure_offline_profile=_env_flag(
-                _ALLOW_OFFLINE_ADMISSION_ENV,
-                default=False,
-            ),
+            validator_profile=profile,
+            allow_insecure_offline_profile=_non_live_opt_out_enabled(),
             pool_size=_env_int("OPENRANGE_SNAPSHOT_POOL_SIZE", 3),
             selection_strategy=os.getenv("OPENRANGE_SNAPSHOT_SELECTION", "random"),
             parent_selection_strategy=os.getenv("OPENRANGE_PARENT_SELECTION", "policy"),
             refill_enabled=_env_flag("OPENRANGE_ENABLE_MANAGED_REFILL", default=False),
             refill_interval_s=float(os.getenv("OPENRANGE_REFILL_INTERVAL_S", "2.0")),
             generation_retries=_env_int("OPENRANGE_GENERATION_RETRIES", 3),
-            live_admission_enabled=_env_flag(
-                "OPENRANGE_ENABLE_LIVE_ADMISSION",
-                default=False,
-            ),
+            live_admission_enabled=live_admission_enabled,
             teardown_booted_projects=not _env_flag(
                 "OPENRANGE_KEEP_BOOTED_VALIDATION_STACKS",
                 default=False,
@@ -523,12 +569,13 @@ class ManagedSnapshotRuntime:
             raise RuntimeError(
                 warning
                 + " Set OPENRANGE_RUNTIME_VALIDATOR_PROFILE=training for strict admission, "
-                + f"or set {_ALLOW_OFFLINE_ADMISSION_ENV}=1 to explicitly opt out."
+                + "or set OPENRANGE_ALLOW_NON_LIVE_ADMISSION=1 "
+                + "(legacy alias: OPENRANGE_ALLOW_OFFLINE_ADMISSION=1) "
+                + "to explicitly opt out."
             )
         logger.warning(
-            "%s Running with explicit opt-out (%s=1).",
+            "%s Running with explicit opt-out.",
             warning,
-            _ALLOW_OFFLINE_ADMISSION_ENV,
         )
 
     @staticmethod
