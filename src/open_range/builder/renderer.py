@@ -42,7 +42,7 @@ _SERVICE_IMAGES: dict[str, str | None] = {
     "mail": "mailhog/mailhog:latest",
     "ldap": "osixia/openldap:1.5.0",
     "siem": "balabit/syslog-ng:latest",
-    "attacker": "kalilinux/kali-rolling",
+    "attacker": "ubuntu:22.04",
     "firewall": None,  # handled by NetworkPolicies
 }
 
@@ -248,10 +248,11 @@ class KindRenderer:
             return [
                 "bash", "-c",
                 (
-                    "apt-get update -qq > /dev/null 2>&1; "
-                    "apt-get install -y -qq nmap curl wget smbclient sqlmap "
-                    "hydra nikto netcat-traditional ssh dnsutils "
-                    "mysql-client python3 > /dev/null 2>&1; "
+                    "apt-get update -qq > /dev/null 2>&1 && "
+                    "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
+                    "nmap curl wget smbclient netcat-openbsd openssh-client "
+                    "dnsutils mysql-client python3 > /dev/null 2>&1; "
+                    "echo '[openrange] attacker tools ready'; "
                     "sleep infinity"
                 ),
             ]
