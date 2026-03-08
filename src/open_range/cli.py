@@ -511,7 +511,7 @@ def validate(
 
     if docker:
         from open_range.builder.renderer import SnapshotRenderer
-        from open_range.server.compose_runner import ComposeProjectRunner
+        from open_range.server.compose_runner import ComposeProjectRunner, apply_rendered_payloads
 
         with tempfile.TemporaryDirectory(prefix="openrange-validate-") as tmpdir:
             artifacts_dir = Path(tmpdir)
@@ -536,6 +536,11 @@ def validate(
             try:
                 project = runner.boot(
                     snapshot_id=snapshot_id,
+                    artifacts_dir=artifacts_dir,
+                    compose=compose,
+                )
+                apply_rendered_payloads(
+                    containers=project.containers,
                     artifacts_dir=artifacts_dir,
                     compose=compose,
                 )
@@ -602,9 +607,8 @@ def deploy(snapshot: str, compose_dir: str | None) -> None:
     If --compose-dir is given, uses that directory; otherwise renders into
     a temporary directory alongside the snapshot.
     """
-    import subprocess
-
     from open_range.builder.renderer import SnapshotRenderer
+    from open_range.server.compose_runner import ComposeProjectRunner, apply_rendered_payloads
 
     spec = _load_snapshot(snapshot)
 
@@ -627,43 +631,27 @@ def deploy(snapshot: str, compose_dir: str | None) -> None:
         click.echo(f"Error: no docker-compose.yml found in {target}", err=True)
         sys.exit(1)
 
+    compose = _load_compose_file(compose_file)
+    snapshot_id = spec.lineage.snapshot_id or Path(snapshot).stem or "deploy"
     click.echo("Starting containers with docker compose ...")
+    runner = ComposeProjectRunner()
     try:
-        proc = subprocess.run(
-            ["docker", "compose", "-f", str(compose_file), "up", "-d", "--build"],
-            cwd=str(target),
-            capture_output=True,
-            text=True,
-            timeout=300,
+        project = runner.boot(
+            snapshot_id=snapshot_id,
+            artifacts_dir=target,
+            compose=compose,
         )
-    except FileNotFoundError:
-        click.echo("Error: docker command not found. Is Docker installed and in PATH?", err=True)
-        sys.exit(1)
-    except subprocess.TimeoutExpired:
-        click.echo("Error: docker compose up timed out after 300s.", err=True)
-        sys.exit(1)
-
-    if proc.returncode != 0:
-        click.echo(f"Error: docker compose up failed (exit {proc.returncode}):", err=True)
-        if proc.stderr:
-            click.echo(proc.stderr, err=True)
+        apply_rendered_payloads(
+            containers=project.containers,
+            artifacts_dir=target,
+            compose=compose,
+        )
+    except Exception as exc:
+        click.echo(f"Error: docker compose up failed: {exc}", err=True)
         sys.exit(1)
 
     click.echo("Containers started.")
-
-    # Show running container status
-    try:
-        ps = subprocess.run(
-            ["docker", "compose", "-f", str(compose_file), "ps", "--format", "table"],
-            cwd=str(target),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if ps.stdout:
-            click.echo(ps.stdout)
-    except Exception:
-        pass  # Non-critical
+    click.echo(f"Project: {project.project_name}")
 
 
 # ---------------------------------------------------------------------------

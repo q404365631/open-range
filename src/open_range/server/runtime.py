@@ -20,7 +20,6 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from pathlib import PurePosixPath
 from typing import Any
 
 import yaml
@@ -28,7 +27,7 @@ import yaml
 from open_range.builder.builder import TemplateOnlyBuilder, default_snapshot_builder
 from open_range.builder.mutation_policy import PopulationMutationPolicy
 from open_range.builder.mutator import Mutator
-from open_range.builder.renderer import PAYLOAD_MANIFEST_NAME, SnapshotRenderer
+from open_range.builder.renderer import SnapshotRenderer
 from open_range.builder.snapshot_store import SnapshotStore
 from open_range.protocols import (
     BuildContext,
@@ -37,7 +36,11 @@ from open_range.protocols import (
     SnapshotBuilder,
     SnapshotSpec,
 )
-from open_range.server.compose_runner import BootedSnapshotProject, ComposeProjectRunner
+from open_range.server.compose_runner import (
+    BootedSnapshotProject,
+    ComposeProjectRunner,
+    apply_rendered_payloads,
+)
 from open_range.models import RangeState
 from open_range.validator.build_boot import BuildBootCheck
 from open_range.validator.difficulty import DifficultyCheck
@@ -1305,56 +1308,8 @@ class ManagedSnapshotRuntime:
         containers: ContainerSet,
         snapshot: SnapshotSpec,
     ) -> None:
-        manifest_path = self._artifacts_dir(snapshot_id) / PAYLOAD_MANIFEST_NAME
-        if not manifest_path.exists():
-            return
-
-        payloads = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if not isinstance(payloads, dict):
-            return
-
-        for file_key, rel_path in payloads.items():
-            src = self._artifacts_dir(snapshot_id) / str(rel_path)
-            if file_key == "db:sql":
-                self._apply_sql_payload(containers, src, snapshot)
-                continue
-
-            if ":" not in file_key:
-                continue
-
-            container, target_path = file_key.split(":", 1)
-            parent_dir = PurePosixPath(target_path).parent.as_posix() or "/"
-            _run_coro_sync(containers.exec(container, f"mkdir -p '{parent_dir}'"))
-            _run_coro_sync(containers.cp(container, str(src), target_path))
-
-    def _apply_sql_payload(
-        self,
-        containers: ContainerSet,
-        sql_path: Path,
-        snapshot: SnapshotSpec,
-    ) -> None:
-        root_password = self._mysql_root_password(snapshot)
-        _run_coro_sync(containers.cp("db", str(sql_path), "/tmp/openrange-generated.sql"))
-        _run_coro_sync(
-            containers.exec(
-                "db",
-                (
-                    "mysql -u root "
-                    f"-p'{root_password}' < /tmp/openrange-generated.sql"
-                ),
-            )
+        apply_rendered_payloads(
+            containers=containers,
+            artifacts_dir=self._artifacts_dir(snapshot_id),
+            compose=snapshot.compose,
         )
-        _run_coro_sync(containers.exec("db", "rm -f /tmp/openrange-generated.sql"))
-
-    @staticmethod
-    def _mysql_root_password(snapshot: SnapshotSpec) -> str:
-        db_service = snapshot.compose.get("services", {}).get("db", {})
-        environment = db_service.get("environment", {})
-        if isinstance(environment, dict):
-            return str(environment.get("MYSQL_ROOT_PASSWORD", "r00tP@ss!"))
-        if isinstance(environment, list):
-            for item in environment:
-                text = str(item)
-                if text.startswith("MYSQL_ROOT_PASSWORD="):
-                    return text.split("=", 1)[1]
-        return "r00tP@ss!"

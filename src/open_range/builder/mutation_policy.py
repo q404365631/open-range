@@ -449,16 +449,12 @@ class PopulationMutationPolicy:
         context: BuildContext,
         rng: random.Random,
     ) -> tuple[list[MutationOp], float, dict[str, float]]:
-        selected: list[MutationChoice] = []
-
         structural = self._select_candidate(
             structural_candidates,
             snapshot=snapshot,
             context=context,
             rng=rng,
         )
-        if structural is not None:
-            selected.append(structural)
 
         security = self._select_candidate(
             security_candidates,
@@ -466,6 +462,28 @@ class PopulationMutationPolicy:
             context=context,
             rng=rng,
         )
+        seed_security_candidates = [
+            candidate
+            for candidate in security_candidates
+            if candidate.op_type == "seed_vuln"
+        ]
+        if (
+            seed_security_candidates
+            and (security is None or security.op.op_type != "seed_vuln")
+        ):
+            forced_seed = self._select_candidate(
+                seed_security_candidates,
+                snapshot=snapshot,
+                context=context,
+                rng=rng,
+                deterministic=True,
+            )
+            if forced_seed is not None:
+                security = forced_seed
+
+        selected: list[MutationChoice] = []
+        if structural is not None:
+            selected.append(structural)
         if security is not None:
             selected.append(security)
 

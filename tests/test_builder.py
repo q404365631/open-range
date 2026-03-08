@@ -588,6 +588,50 @@ async def test_mutator_seed_vuln_adds_flag_task_path_and_payloads(tier1_manifest
 
 
 @pytest.mark.asyncio
+async def test_mutator_does_not_collapse_child_reset_to_benign_noise_when_seed_vuln_exists(
+    tier1_manifest,
+):
+    from open_range.builder.builder import TemplateOnlyBuilder
+    from open_range.builder.mutation_policy import MutationPolicySettings, PopulationMutationPolicy
+    from open_range.builder.mutator import Mutator
+
+    noise_biased_policy = PopulationMutationPolicy(
+        settings=MutationPolicySettings(
+            profile_name="noise_biased",
+            mutation={
+                "curriculum_weight": 0.0,
+                "novelty_weight": 0.0,
+                "structural_gain_weight": 1.0,
+                "lineage_weight": 0.0,
+            },
+            structural_gains={
+                "add_service": 0.2,
+                "add_dependency_edge": 0.2,
+                "add_trust_edge": 0.2,
+                "add_user": 0.2,
+                "seed_vuln": 0.1,
+                "add_benign_noise": 2.5,
+                "default_gain": 0.0,
+            },
+        )
+    )
+    mutator = Mutator(TemplateOnlyBuilder(), policy=noise_biased_policy)
+    parent = await mutator.mutate(tier1_manifest, context=BuildContext(seed=1, tier=1))
+
+    child = await mutator.mutate(
+        tier1_manifest,
+        context=BuildContext(seed=2, tier=1),
+        parent_snapshot=parent,
+        parent_snapshot_id="root_snap",
+    )
+
+    assert child.mutation_plan is not None
+    assert any(op.op_type == "seed_vuln" for op in child.mutation_plan.ops)
+    assert child.lineage.mutation_summary
+    assert any(summary.startswith("seed ") for summary in child.lineage.mutation_summary)
+
+
+@pytest.mark.asyncio
 async def test_mutator_fails_fast_on_illegal_seed_vuln_family(tier1_manifest):
     from open_range.builder.builder import TemplateOnlyBuilder
     from open_range.builder.mutator import Mutator
