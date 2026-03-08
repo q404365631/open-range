@@ -31,26 +31,29 @@ volumes:
 
 services:
   attacker:
-    image: kalilinux/kali-rolling:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.attacker
     cap_add:
       - NET_ADMIN
     command:
       - bash
-      - -c
+      - -lc
       - |
-        apt-get update -qq && apt-get install -y -qq \
-          libblas3 nmap sqlmap hydra nikto smbclient curl wget netcat-openbsd \
-          ssh dnsutils tcpdump python3 python3-pip iproute2 sshpass \
-          default-mysql-client ldap-utils \
-          > /dev/null 2>&1
-        ip route add 10.0.1.0/24 via 10.0.0.2 2>/dev/null || true
-        ip route add 10.0.2.0/24 via 10.0.0.2 2>/dev/null || true
-        ip route add 10.0.3.0/24 via 10.0.0.2 2>/dev/null || true
+        /usr/sbin/ip route add 10.0.1.0/24 via 10.0.0.2 2>/dev/null || true
+        /usr/sbin/ip route add 10.0.2.0/24 via 10.0.0.2 2>/dev/null || true
+        /usr/sbin/ip route add 10.0.3.0/24 via 10.0.0.2 2>/dev/null || true
         tail -f /dev/null
     extra_hosts:
       - "firewall:10.0.0.2"
+{%- if 'vpn_gw' in host_names %}
+      - "vpn_gw:10.0.0.11"
+{%- endif %}
       - "web:10.0.1.10"
       - "mail:10.0.1.11"
+{%- if 'jumpbox' in host_names %}
+      - "jumpbox:10.0.1.12"
+{%- endif %}
       - "db:10.0.2.20"
       - "files:10.0.2.21"
       - "ldap:10.0.3.20"
@@ -61,32 +64,34 @@ services:
     healthcheck:
       test:
         - "CMD-SHELL"
-        - "nmap --version >/dev/null 2>&1 && ip route | grep -q '10.0.1.0/24 via 10.0.0.2' && getent hosts web db files ldap siem >/dev/null 2>&1"
+        - "nmap --version >/dev/null 2>&1 && /usr/sbin/ip route | grep -q '10.0.1.0/24 via 10.0.0.2' && getent hosts web db files ldap siem >/dev/null 2>&1"
       interval: 10s
       timeout: 5s
-      retries: 12
+      retries: 24
     restart: unless-stopped
 
   firewall:
-    image: ubuntu:22.04
+    build:
+      context: .
+      dockerfile: Dockerfile.firewall
     cap_add:
       - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
     command:
       - bash
-      - -c
+      - -lc
       - |
-        apt-get update -qq && apt-get install -y -qq iptables iproute2 > /dev/null 2>&1
-        echo 1 > /proc/sys/net/ipv4/ip_forward
-        iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -d 10.0.1.0/24 -j MASQUERADE
-        iptables -t nat -A POSTROUTING -s 10.0.1.0/24 -d 10.0.2.0/24 -j MASQUERADE
-        iptables -t nat -A POSTROUTING -s 10.0.1.0/24 -d 10.0.3.0/24 -j MASQUERADE
-        iptables -t nat -A POSTROUTING -s 10.0.2.0/24 -d 10.0.3.0/24 -j MASQUERADE
-        iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-        iptables -A FORWARD -s 10.0.0.0/24 -d 10.0.1.0/24 -j ACCEPT
-        iptables -A FORWARD -s 10.0.1.0/24 -d 10.0.2.0/24 -j ACCEPT
-        iptables -A FORWARD -s 10.0.1.0/24 -d 10.0.3.0/24 -j ACCEPT
-        iptables -A FORWARD -s 10.0.2.0/24 -d 10.0.3.0/24 -j ACCEPT
-        iptables -A FORWARD -j DROP
+        /usr/sbin/iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -d 10.0.1.0/24 -j MASQUERADE
+        /usr/sbin/iptables -t nat -A POSTROUTING -s 10.0.1.0/24 -d 10.0.2.0/24 -j MASQUERADE
+        /usr/sbin/iptables -t nat -A POSTROUTING -s 10.0.1.0/24 -d 10.0.3.0/24 -j MASQUERADE
+        /usr/sbin/iptables -t nat -A POSTROUTING -s 10.0.2.0/24 -d 10.0.3.0/24 -j MASQUERADE
+        /usr/sbin/iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+        /usr/sbin/iptables -A FORWARD -s 10.0.0.0/24 -d 10.0.1.0/24 -j ACCEPT
+        /usr/sbin/iptables -A FORWARD -s 10.0.1.0/24 -d 10.0.2.0/24 -j ACCEPT
+        /usr/sbin/iptables -A FORWARD -s 10.0.1.0/24 -d 10.0.3.0/24 -j ACCEPT
+        /usr/sbin/iptables -A FORWARD -s 10.0.2.0/24 -d 10.0.3.0/24 -j ACCEPT
+        /usr/sbin/iptables -A FORWARD -j DROP
         tail -f /dev/null
     networks:
       external:
@@ -100,11 +105,32 @@ services:
     healthcheck:
       test:
         - "CMD-SHELL"
-        - "grep -qx '1' /proc/sys/net/ipv4/ip_forward && iptables -C FORWARD -s 10.0.0.0/24 -d 10.0.1.0/24 -j ACCEPT >/dev/null 2>&1 && iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -d 10.0.1.0/24 -j MASQUERADE >/dev/null 2>&1"
+        - "grep -qx '1' /proc/sys/net/ipv4/ip_forward && /usr/sbin/iptables -C FORWARD -s 10.0.0.0/24 -d 10.0.1.0/24 -j ACCEPT >/dev/null 2>&1 && /usr/sbin/iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -d 10.0.1.0/24 -j MASQUERADE >/dev/null 2>&1"
+      interval: 10s
+      timeout: 5s
+      retries: 24
+    restart: unless-stopped
+
+{%- if 'vpn_gw' in host_names %}
+
+  vpn_gw:
+    build:
+      context: .
+      dockerfile: Dockerfile.vpn
+    cap_add:
+      - NET_ADMIN
+    networks:
+      external:
+        ipv4_address: 10.0.0.11
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "pgrep -x sshd >/dev/null 2>&1"
       interval: 10s
       timeout: 5s
       retries: 12
     restart: unless-stopped
+{%- endif %}
 
   web:
     build:
@@ -142,6 +168,25 @@ services:
       dmz:
         ipv4_address: 10.0.1.11
     restart: unless-stopped
+
+{%- if 'jumpbox' in host_names %}
+
+  jumpbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.jumpbox
+    networks:
+      dmz:
+        ipv4_address: 10.0.1.12
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "pgrep -x sshd >/dev/null 2>&1"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+{%- endif %}
 
   db:
     build:
@@ -194,12 +239,13 @@ services:
     restart: unless-stopped
 
   siem:
-    image: ubuntu:22.04
+    build:
+      context: .
+      dockerfile: Dockerfile.siem
     command:
       - bash
-      - -c
+      - -lc
       - |
-        apt-get update -qq && apt-get install -y -qq rsyslog jq curl grep gawk > /dev/null 2>&1
         mkdir -p /var/log/siem/consolidated
         touch /var/log/siem/consolidated/all.log
         tail -f /dev/null

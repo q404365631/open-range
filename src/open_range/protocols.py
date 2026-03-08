@@ -11,7 +11,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +234,38 @@ class TaskSpec(BaseModel):
     )  # [{type: "flag", value: "..."}, {type: "endpoint", url: "...", expect: "..."}]
 
 
+class ChallengeSpec(BaseModel):
+    """First-class challenge/task unit inside a snapshot world."""
+
+    id: str = ""
+    name: str = ""
+    challenge_type: str = "exploit"
+    roles: list[str] = Field(default_factory=list)
+    role_briefings: dict[str, str] = Field(default_factory=dict)
+    entry_points: list[str] = Field(default_factory=list)
+    success_conditions: list[dict[str, Any]] = Field(default_factory=list)
+    linked_vulns: list[str] = Field(default_factory=list)
+    linked_flags: list[str] = Field(default_factory=list)
+    evidence_requirements: list[str] = Field(default_factory=list)
+    difficulty: str = ""
+    prerequisites: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ServiceInstance(BaseModel):
+    """Concrete service instance the renderer should materialize."""
+
+    instance_id: str = ""
+    host: str
+    service_name: str = ""
+    archetype: str = ""
+    image: str = ""
+    ports: list[int] = Field(default_factory=list)
+    env_vars: dict[str, str] = Field(default_factory=dict)
+    startup_contract: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class SnapshotSpec(BaseModel):
     """Complete specification for a generated range snapshot."""
 
@@ -245,11 +277,20 @@ class SnapshotSpec(BaseModel):
     npc_personas: list[NPCPersona] = Field(default_factory=list)
     npc_traffic: NPCTrafficSpec = Field(default_factory=NPCTrafficSpec)
     task: TaskSpec = Field(default_factory=TaskSpec)
+    challenges: list[ChallengeSpec] = Field(default_factory=list)
+    service_instances: list[ServiceInstance] = Field(default_factory=list)
     compose: dict[str, Any] = Field(default_factory=dict)  # rendered docker-compose
     files: dict[str, str] = Field(default_factory=dict)  # path -> content
     services: list[ServiceSpec] = Field(default_factory=list)  # subprocess-mode daemons
     lineage: LineageMetadata = Field(default_factory=LineageMetadata)
     mutation_plan: MutationPlan | None = None
+
+    @model_validator(mode="after")
+    def _sync_legacy_task_view(self) -> "SnapshotSpec":
+        """Backfill ``task`` from ``challenges`` when only the richer form exists."""
+        if self.challenges and _task_is_empty(self.task):
+            self.task = task_from_challenge(self.challenges[0])
+        return self
 
 
 class Stimulus(BaseModel):
@@ -261,6 +302,68 @@ class Stimulus(BaseModel):
     content: str = ""
     attachments: list[str] = Field(default_factory=list)
     plausibility: float = 0.5  # 0.0-1.0
+
+
+def build_default_challenge_catalog(
+    task: TaskSpec,
+    truth_graph: TruthGraph,
+    flags: list[FlagSpec],
+    evidence_spec: list[EvidenceItem],
+) -> list[ChallengeSpec]:
+    """Build a one-entry challenge catalog from the legacy task view."""
+    if _task_is_empty(task) and not truth_graph.vulns and not flags and not evidence_spec:
+        return []
+
+    entry_points = [vuln.injection_point for vuln in truth_graph.vulns if vuln.injection_point]
+    challenge_id = truth_graph.vulns[0].id if truth_graph.vulns else "challenge_primary"
+    challenge_type = task.task_type or (truth_graph.vulns[0].type if truth_graph.vulns else "exploit")
+    role_briefings = {
+        role: briefing
+        for role, briefing in {
+            "red": task.red_briefing,
+            "blue": task.blue_briefing,
+        }.items()
+        if briefing
+    }
+    roles = list(role_briefings) or ["red", "blue"]
+    return [
+        ChallengeSpec(
+            id=challenge_id,
+            name=challenge_id,
+            challenge_type=challenge_type,
+            roles=roles,
+            role_briefings=role_briefings,
+            entry_points=entry_points,
+            success_conditions=list(task.success_conditions),
+            linked_vulns=[vuln.id for vuln in truth_graph.vulns],
+            linked_flags=[flag.id for flag in flags],
+            evidence_requirements=[item.location for item in evidence_spec if item.location],
+            prerequisites=list(task.milestones),
+        )
+    ]
+
+
+def task_from_challenge(challenge: ChallengeSpec) -> TaskSpec:
+    """Project a challenge unit back into the legacy task view."""
+    role_briefings = challenge.role_briefings if isinstance(challenge.role_briefings, dict) else {}
+    return TaskSpec(
+        red_briefing=str(role_briefings.get("red", "")),
+        blue_briefing=str(role_briefings.get("blue", "")),
+        task_type=challenge.challenge_type or "exploit",
+        milestones=list(challenge.prerequisites),
+        success_conditions=list(challenge.success_conditions),
+    )
+
+
+def _task_is_empty(task: TaskSpec) -> bool:
+    return not any(
+        [
+            task.red_briefing,
+            task.blue_briefing,
+            task.milestones,
+            task.success_conditions,
+        ]
+    )
 
 
 class NPCAction(BaseModel):

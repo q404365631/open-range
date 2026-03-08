@@ -18,6 +18,7 @@ dependencies = [
     "jinja2>=3.1",
     "uvicorn>=0.24.0",
     "gradio>=4.0.0",
+    "huggingface-hub>=1.6.0",
 ]
 
 [project.optional-dependencies]
@@ -33,7 +34,6 @@ server = "open_range.server.app:main"
 [tool.setuptools]
 include-package-data = true
 packages = [
-    "manifests",
     "open_range",
     "open_range.agents",
     "open_range.builder",

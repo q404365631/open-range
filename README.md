@@ -14,6 +14,8 @@ tags:
 
 # OpenRange
 
+![OpenRange: Multi-Agent Cybersecurity Training Gymnasium](assets/evolving_gym_hero.png)
+
 A multi-agent cybersecurity gymnasium on [OpenEnv](https://github.com/meta-pytorch/OpenEnv). Red and Blue agents train on validated enterprise networks that mutate between episodes.
 
 ---
@@ -78,17 +80,40 @@ uv run openrange synthetic-data \
 # Run the OpenEnv client against a running server
 uv run python examples/remote_client_demo.py --base-url http://localhost:8000
 
+# Build, validate, and boot a fresh range locally (Tier 2 example)
+export OPENRANGE_BUILDER_MODEL="${OPENRANGE_BUILDER_MODEL:-azure/gpt-5.2-codex}"
+uv run python -m open_range.lint manifests/tier2_corporate.yaml
+uv run openrange build \
+  -m manifests/tier2_corporate.yaml \
+  -o /tmp/openrange-tier2/snapshot \
+  --tier 2 \
+  --model "$OPENRANGE_BUILDER_MODEL" \
+  --max-tokens 4096 \
+  --timeout 180
+uv run openrange validate -s /tmp/openrange-tier2/snapshot/spec.json
+uv run openrange validate -s /tmp/openrange-tier2/snapshot/spec.json --docker
+uv run openrange validate -s /tmp/openrange-tier2/snapshot/spec.json --docker \
+  --deploy-hf --hf-space <user>/<space>
+uv run openrange render -s /tmp/openrange-tier2/snapshot/spec.json -o /tmp/openrange-tier2/artifacts
+uv run openrange deploy -s /tmp/openrange-tier2/snapshot/spec.json --compose-dir /tmp/openrange-tier2/artifacts
+uv run openrange episode -s /tmp/openrange-tier2/snapshot/spec.json --docker --golden-path
+
 # Run the FastAPI server
-uv run server                                   # default: 127.0.0.1:8000
-uv run server --port 9000                       # custom port
-uv run server --host 0.0.0.0                    # bind all interfaces
+uv run openrange server                         # default: 0.0.0.0:8000
+uv run openrange server --port 9000             # custom port
 
 # Or via uvicorn directly
-uv run uvicorn server.app:app --host 0.0.0.0 --port 8000 --reload
+uv run uvicorn open_range.server.app:app --host 0.0.0.0 --port 8000 --reload
 
 # Tests
 uv run pytest tests/ -v --tb=short
 ```
+
+Notes:
+- `openrange validate --docker` now boots a temporary compose project, runs the live Docker-backed checks, and tears the project down automatically.
+- `openrange validate --deploy-hf` uploads the current app plus the validated snapshot to a Hugging Face Space and configures the Space to boot that exact snapshot.
+- The same workflow works for any manifest; swap the manifest path, output directory, and `--tier` value to match the range you want to build.
+- For large builder responses, cap `--max-tokens` and set an explicit `--timeout` so the CLI fails fast instead of waiting indefinitely on oversized generations.
 
 ## Core Components
 
@@ -175,13 +200,29 @@ Difficulty grows horizontally — more hosts, zones, and chained attack surface.
 
 Built directly on the OpenEnv HTTP/WebSocket contract.
 
+## CLI
+
+The `openrange` CLI covers the full lifecycle:
+
+| Command | What it does |
+|---------|-------------|
+| `openrange build` | Generate a snapshot from a manifest (LLM or template) |
+| `openrange validate` | Run admission checks against a snapshot |
+| `openrange render` | Render a snapshot into Docker artifacts |
+| `openrange deploy` | Boot a rendered snapshot via Docker Compose |
+| `openrange episode` | Run a scripted or interactive episode |
+| `openrange synthetic-data` | Generate SFT training traces |
+| `openrange server` | Start the OpenEnv FastAPI server |
+
+Run `uv run openrange --help` for full option details.
+
 ## Docs
 
-- [Architecture](docs/architecture.md) — full pipeline, network topology, episode lifecycle
-- [Builder & Validator](docs/builder-validator.md) — snapshot generation and admission
-- [Red & Blue Agents](docs/red-blue-agents.md) — tandem training, reward coupling, curriculum
-- [Synthetic Data](docs/synthetic-data.md) — snapshot-backed SFT trace generation with LiteLLM teachers
-- [Agent Protocols](docs/agent-protocols.md) — agent interface, episode runner, evaluation
+- [Architecture](docs/architecture.md) — pipeline, network topology, episode lifecycle, rewards
+- [Builder & Validator](docs/builder-validator.md) — snapshot generation, rendering, and admission
+- [Agents](docs/red-blue-agents.md) — BYO agent protocol, tandem training, reward coupling
+- [Synthetic Data](docs/synthetic-data.md) — snapshot-backed SFT trace generation
+- [Mutation Policy](docs/mutation_policy.md) — parent selection and mutation weight tuning
 - [OpenEnv Compliance](docs/openenv-compliance.md) — API contract, models, deployment
 
 ## Built On

@@ -25,8 +25,8 @@ OpenRange implements the OpenEnv 0.2.x environment contract. This doc maps every
 | `/reset`, `/step`, `/state` HTTP | Done | Provided by `create_app(...)` |
 | `Rubric` for rewards | Done | `CompositeRedReward`, `CompositeBlueReward` (lazy-loaded in `RangeEnvironment._apply_rewards`) |
 | `openenv.yaml` manifest | Done | Root `openenv.yaml` with `spec_version`, `type`, `runtime`, `app`, and `port` |
-| `Dockerfile` | Done | Root `Dockerfile` plus `server/Dockerfile`, both launching `uvicorn server.app:app` |
-| `python -m open_range.server` entry point | Done | `open_range.server.__main__` plus `server` console script |
+| `Dockerfile` | Done | Root `Dockerfile` launching `uvicorn open_range.server.app:app` |
+| `python -m open_range.server` entry point | Done | `open_range.server.__main__` plus `openrange server` CLI command |
 
 ## Server Mode
 
@@ -38,30 +38,10 @@ The server entrypoint is the standard OpenEnv app factory:
 
 ## Deployment
 
-The OpenEnv server runs as a **container in the same Docker Compose stack** as the enterprise range. It reaches range containers via the Docker SDK (mounted `/var/run/docker.sock`).
+Two execution modes, same API:
 
-```mermaid
-flowchart TD
-    subgraph compose [docker-compose.yml]
-        subgraph server [OpenEnv Server Container]
-            APP[FastAPI app<br/>/health, /metadata, /schema,<br/>/reset, /step, /state, /ws]
-        end
-        subgraph range [Enterprise Range - 8 containers]
-            ATK[attacker] --- FW[firewall]
-            FW --- WEB[web] --- MAIL[mail]
-            WEB --- DB[db] --- FILES[files]
-            DB --- LDAP[ldap] --- SIEM[siem]
-        end
-        SOCK[docker.sock mount]
-    end
-
-    APP -->|docker SDK| SOCK
-    SOCK -->|docker exec| range
-    APP -->|port 8000| EXT[External clients]
-
-    style server fill:#6bcb7722,stroke:#6bcb77
-    style range fill:#7c73e622,stroke:#7c73e6
-```
+- **Docker mode** (local dev): Server and range services in separate Docker Compose containers. Commands route via Docker SDK (`docker exec`).
+- **Subprocess mode** (HF Spaces): All services run as background processes in a single container. Commands route via `subprocess.run()`. Set `OPENRANGE_EXECUTION_MODE=subprocess`.
 
 `reset()` selects a pre-validated frozen snapshot from the snapshot store. No LLM calls in the hot path -- snapshot generation is asynchronous.
 
@@ -82,8 +62,10 @@ flowchart TD
 class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
     SUPPORTS_CONCURRENT_SESSIONS = False
 
-    def __init__(self, max_steps: int = 100, exec_timeout: float = 30.0,
-                 docker_available: bool | None = None) -> None: ...
+    def __init__(self, runtime: ManagedSnapshotRuntime | None = None,
+                 max_steps: int = 100, exec_timeout: float = 30.0,
+                 docker_available: bool | None = None,
+                 execution_mode: str = "auto") -> None: ...
     def reset(self, seed: int | None = None,
               episode_id: str | None = None, **kwargs) -> RangeObservation: ...
     def step(self, action: RangeAction,
@@ -98,10 +80,13 @@ class OpenRangeEnv(EnvClient[RangeAction, RangeObservation, RangeState]):
     def _parse_state(self, payload: dict) -> RangeState: ...
 
 # App factory (src/open_range/server/app.py)
-app = create_app(RangeEnvironment, RangeAction, RangeObservation, env_name="open_range")
+# Uses an env_factory closure with shared runtime, not the class directly:
+def env_factory() -> RangeEnvironment:
+    return RangeEnvironment(runtime=runtime)
+app = create_openenv_app(env_factory, RangeAction, RangeObservation, env_name="open_range")
 
-# Entry point (src/open_range/server/__main__.py)
-# python -m open_range.server [--host HOST] [--port PORT] [--reload] [--log-level LEVEL]
+# Entry point
+# uv run openrange server [--host HOST] [--port PORT]
 ```
 
 ## Reference Implementations

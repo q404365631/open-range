@@ -92,20 +92,49 @@ Blue runs commands on the **siem** container (management zone) and can issue def
 
 Blue sees the full log stream (web access logs, DB query logs, auth logs, firewall logs) mixed with NPC traffic. Blue must distinguish real attacks from noise.
 
-### MCP Alternative
+### MCP Alternative (Implemented)
 
-For agents that prefer structured tool discovery (RFC 003), OpenRange can expose tools via MCP:
+For agents that prefer structured tool discovery (OpenEnv RFC 003), `RangeEnvironment` extends `MCPEnvironment` and exposes 9 MCP tools via `ListToolsAction` / `CallToolAction`. Tool names follow the [open-trajectory-gym](https://github.com/open-cybernauts/open-trajectory-gym) canonical registry for SFT data compatibility.
+
+| Tool | Args | Role | TrajGym | What it does |
+|------|------|------|---------|-------------|
+| `shell_command` | `command`, `mode="red"` | Both | `shell_command` | Execute a shell command on your workstation |
+| `python_code` | `code`, `timeout=120` | Both | `python_code` | Execute Python code in the container |
+| `submit_flag` | `flag` | Red | `submit_flag` | Submit a captured flag for verification |
+| `submit_finding` | `description` | Blue | — | Report a detected attack for detection reward |
+| `get_challenge` | `role="red"` | Both | — | Get briefing, milestones, and success conditions |
+| `get_progress` | *(none)* | Both | — | Get steps taken, flags captured, milestones completed |
+| `check_services` | *(none)* | Both | — | Check health status of all range services |
 
 ```python
-# Agent discovers tools
-tools = await env.list_tools()
-# [Tool(name="run_command", ...), Tool(name="submit_flag", ...)]
+from openenv.core.env_server.mcp_types import (
+    CallToolAction, CallToolObservation,
+    ListToolsAction, ListToolsObservation,
+)
 
-# Agent calls tool
-result = await env.call_tool("run_command", command="nmap -sV web")
+env = RangeEnvironment(docker_available=False)
+
+# Discover available tools
+obs = env.step(ListToolsAction())
+# obs.tools -> [Tool(name="shell_command", ...), Tool(name="python_code", ...), ...]
+
+# Run a shell command
+obs = env.step(CallToolAction(tool_name="shell_command", arguments={"command": "nmap -sV web"}))
+# obs.result -> "Starting Nmap 7.94 ..."
+
+# Run Python code
+obs = env.step(CallToolAction(tool_name="python_code", arguments={"code": "import socket; print(socket.gethostname())"}))
+
+# Submit a flag
+obs = env.step(CallToolAction(tool_name="submit_flag", arguments={"flag": "FLAG{idor_2_db}"}))
+# obs.result -> "Correct! Flag accepted."
+
+# Check progress
+obs = env.step(CallToolAction(tool_name="get_progress", arguments={}))
+# obs.result -> "Episode: ep-123\nTier: 1\nSteps: 5 / 100\nFlags: 1 / 3"
 ```
 
-Both modes (`RangeAction` string commands and MCP tool calls) route to the same `docker exec` backend. Use whichever matches your agent framework.
+Both modes (`RangeAction` text commands and MCP `CallToolAction` structured calls) route to the same backend. Use whichever matches your agent framework. Text commands go through `_step_impl()` directly; MCP actions are dispatched by the `MCPEnvironment` base class.
 
 ## Episode Loop (Implemented)
 
@@ -207,8 +236,6 @@ Default is strict alternation (Red → Blue → Red → ...). Configurable:
 | `ratio` | RRR → B → RRR → B | Red gets N steps per Blue step. More realistic. |
 | `async` | Both act on own schedule | Most realistic. Blue observes log stream continuously. |
 
-For hackathon: use `alternating`. Async mode is a post-hackathon stretch.
-
 ## BYO Agents
 
 ### Pattern 1: LiteLLM (Any Model) (Implemented)
@@ -285,7 +312,7 @@ blue = LLMRangeAgent(model="together_ai/meta-llama/Meta-Llama-3.1-405B")
 
 ### Pattern 2: Scripted Agent (Testing / Demo) (Implemented)
 
-For hackathon demo and integration tests. No LLM required. There is a generic `ScriptedAgent` base class and pre-built `ScriptedRedAgent` / `ScriptedBlueAgent` subclasses.
+For demos and integration tests. No LLM required. There is a generic `ScriptedAgent` base class and pre-built `ScriptedRedAgent` / `ScriptedBlueAgent` subclasses.
 
 ```python
 class ScriptedAgent:
@@ -323,9 +350,9 @@ class ScriptedBlueAgent(ScriptedAgent):
         super().__init__(commands=DEMO_BLUE_SCRIPT, fallback="check_services")
 ```
 
-### Pattern 3: Open-Weight Model (Local Inference) (Planned)
+### Pattern 3: Open-Weight Model (Local Inference)
 
-For GRPO training with gradient access. The model runs locally and generates commands directly. No `LocalModelAgent` is implemented yet -- this pattern shows how to satisfy the `RangeAgent` protocol with a local HuggingFace model.
+For GRPO training with gradient access. The model runs locally and generates commands directly. This pattern shows how to satisfy the `RangeAgent` protocol with a local HuggingFace model:
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -528,7 +555,7 @@ logger, lines = generator.export_jsonl(
 
 For live Docker episodes or custom rollout loops, `TrajectoryLogger` still remains the low-level recorder and JSONL exporter.
 
-### Asymmetric GRPO (Planned)
+### Asymmetric GRPO
 
 Train one side via GRPO while the other plays as a fixed opponent:
 

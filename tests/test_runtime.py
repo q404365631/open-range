@@ -16,7 +16,48 @@ from open_range.server.runtime import ManagedSnapshotRuntime
 from open_range.validator.validator import ValidationResult
 
 
+@pytest.fixture(autouse=True)
+def _clear_runtime_builder_env(monkeypatch: pytest.MonkeyPatch):
+    for name in (
+        "OPENRANGE_RUNTIME_BUILDER",
+        "OPENRANGE_BUILDER_MODEL",
+        "AZURE_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_API_BASE",
+        "AZURE_OPENAI_ENDPOINT",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "LITELLM_API_KEY",
+        "OLLAMA_HOST",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 class TestManagedSnapshotRuntime:
+    def test_from_env_prefers_llm_builder_when_provider_config_is_present(
+        self,
+        tier1_manifest,
+        tmp_path,
+        monkeypatch,
+    ):
+        from open_range.builder.builder import LLMSnapshotBuilder, litellm
+
+        if litellm is None:
+            pytest.skip("builder extra not installed")
+
+        manifest_path = tmp_path / "manifest.yaml"
+        manifest_path.write_text(yaml.safe_dump(tier1_manifest), encoding="utf-8")
+
+        monkeypatch.setenv("OPENRANGE_RUNTIME_MANIFEST", str(manifest_path))
+        monkeypatch.setenv("OPENRANGE_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+        monkeypatch.setenv("AZURE_API_KEY", "test-key")
+        monkeypatch.setenv("AZURE_API_BASE", "https://example.openai.azure.com")
+
+        runtime = ManagedSnapshotRuntime.from_env()
+        assert isinstance(runtime.builder, LLMSnapshotBuilder)
+
     def test_from_env_defaults_to_training_and_live(self, tier1_manifest, tmp_path, monkeypatch):
         manifest_path = tmp_path / "manifest.yaml"
         manifest_path.write_text(yaml.safe_dump(tier1_manifest), encoding="utf-8")

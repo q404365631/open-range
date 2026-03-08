@@ -104,12 +104,17 @@ class TestParseLLMOutput:
 
 
 class TestRenderedFilesExist:
-    """Verify all 6 template outputs are created."""
+    """Verify all rendered template outputs are created."""
 
     EXPECTED_FILES = [
         "docker-compose.yml",
+        "Dockerfile.attacker",
         "Dockerfile.web",
         "Dockerfile.db",
+        "Dockerfile.firewall",
+        "Dockerfile.jumpbox",
+        "Dockerfile.siem",
+        "Dockerfile.vpn",
         "nginx.conf",
         "init.sql",
         "iptables.rules",

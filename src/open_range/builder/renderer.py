@@ -17,6 +17,7 @@ from typing import Any
 import jinja2
 
 from open_range.builder.manifest_graph import runtime_contract_from_topology
+from open_range.builder.service_catalog import infer_service_instances
 from open_range.builder.service_manifest import generate_service_specs
 from open_range.protocols import SnapshotSpec
 
@@ -28,8 +29,13 @@ _TEMPLATE_DIR = Path(__file__).parent / "templates"
 # Map of template filename -> output filename
 _TEMPLATE_MAP: dict[str, str] = {
     "docker-compose.yml.j2": "docker-compose.yml",
+    "Dockerfile.attacker.j2": "Dockerfile.attacker",
     "Dockerfile.web.j2": "Dockerfile.web",
     "Dockerfile.db.j2": "Dockerfile.db",
+    "Dockerfile.firewall.j2": "Dockerfile.firewall",
+    "Dockerfile.jumpbox.j2": "Dockerfile.jumpbox",
+    "Dockerfile.siem.j2": "Dockerfile.siem",
+    "Dockerfile.vpn.j2": "Dockerfile.vpn",
     "nginx.conf.j2": "nginx.conf",
     "init.sql.j2": "init.sql",
     "iptables.rules.j2": "iptables.rules",
@@ -100,18 +106,25 @@ class SnapshotRenderer:
     def _build_service_specs(self, spec: SnapshotSpec) -> None:
         """Populate ``spec.services`` from compose and topology.
 
-        Delegates to :func:`generate_service_specs` which maps Docker
-        image names (or topology host names) to subprocess-mode daemon
-        lifecycle declarations.  Only runs if the spec does not already
-        have services declared (idempotent).
+        Delegates to :func:`generate_service_specs` which resolves explicit
+        or inferred service instances through the archetype registry into
+        subprocess-mode daemon lifecycle declarations. Only runs if the spec
+        does not already have services declared (idempotent).
         """
         if spec.services:
             logger.debug("ServiceSpec entries already present — skipping generation")
             return
 
+        if not spec.service_instances:
+            spec.service_instances = infer_service_instances(
+                compose=spec.compose,
+                topology=spec.topology,
+            )
+
         svc_specs = generate_service_specs(
             compose=spec.compose,
             topology=spec.topology,
+            service_instances=spec.service_instances,
         )
         spec.services = svc_specs
         if svc_specs:

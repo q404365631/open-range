@@ -68,6 +68,13 @@ class TestReset:
         assert isinstance(obs, RangeObservation)
         assert env.snapshot is not None
 
+    def test_reset_uses_default_snapshot_when_configured(self, sample_snapshot_spec):
+        env = RangeEnvironment(docker_available=False, default_snapshot=sample_snapshot_spec)
+        obs = env.reset()
+        assert isinstance(obs, RangeObservation)
+        assert env.snapshot is not None
+        assert env.snapshot.flags == sample_snapshot_spec.flags
+
     def test_reset_initializes_services_status_from_topology_hosts(self):
         env = RangeEnvironment(docker_available=False)
         env.reset(snapshot=_MINIMAL_SNAPSHOT)

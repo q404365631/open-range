@@ -17,6 +17,7 @@ import asyncio
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -24,6 +25,8 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import yaml
+
+from open_range.builder.builder import default_snapshot_builder
 
 logger = logging.getLogger(__name__)
 
@@ -293,7 +296,6 @@ class CurriculumRunner:
         This grounds the manifest axis in real environment input rather than
         using manifest names only for reporting metadata.
         """
-        from open_range.builder.builder import TemplateOnlyBuilder
         from open_range.protocols import BuildContext
 
         manifest = self._manifest_cache.get(manifest_path)
@@ -312,7 +314,10 @@ class CurriculumRunner:
             self._manifest_cache[manifest_path] = manifest
 
         if self._snapshot_builder is None:
-            self._snapshot_builder = TemplateOnlyBuilder()
+            self._snapshot_builder = default_snapshot_builder(
+                os.getenv("OPENRANGE_TRAINING_BUILDER", "auto"),
+                reason="training runner",
+            )
 
         tier = int(manifest.get("tier", 1) or 1)
         context = BuildContext(seed=seed, tier=tier)

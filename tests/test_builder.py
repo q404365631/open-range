@@ -3,10 +3,84 @@
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from open_range.protocols import BuildContext, FlagSpec, GoldenPathStep, SnapshotSpec
+
+
+def _clear_builder_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "OPENRANGE_BUILDER_MODEL",
+        "AZURE_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_API_BASE",
+        "AZURE_OPENAI_ENDPOINT",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "LITELLM_API_KEY",
+        "OLLAMA_HOST",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_default_snapshot_builder_auto_falls_back_to_template_without_llm_config(monkeypatch):
+    from open_range.builder.builder import TemplateOnlyBuilder, default_snapshot_builder
+
+    _clear_builder_env(monkeypatch)
+    builder = default_snapshot_builder("auto", reason="test")
+    assert isinstance(builder, TemplateOnlyBuilder)
+
+
+def test_default_snapshot_builder_auto_uses_llm_when_azure_config_is_present(monkeypatch):
+    import open_range.builder.builder as builder_module
+
+    if builder_module.litellm is None:
+        pytest.skip("builder extra not installed")
+
+    from open_range.builder.builder import LLMSnapshotBuilder, default_snapshot_builder
+
+    _clear_builder_env(monkeypatch)
+    monkeypatch.setenv("AZURE_API_KEY", "test-key")
+    monkeypatch.setenv("AZURE_API_BASE", "https://example.openai.azure.com")
+    builder = default_snapshot_builder("auto", reason="test")
+    assert isinstance(builder, LLMSnapshotBuilder)
+
+
+@pytest.mark.asyncio
+async def test_llm_builder_backfills_manifest_tier_and_difficulty(monkeypatch, tier2_manifest):
+    import open_range.builder.builder as builder_module
+
+    raw = json.dumps(
+        {
+            "topology": {"hosts": ["attacker", "web", "siem"], "zones": {"dmz": ["web"]}},
+            "truth_graph": {"vulns": [], "exploit_chain": []},
+            "golden_path": [],
+            "flags": [],
+            "evidence_spec": {},
+            "npc_personas": [],
+            "npc_traffic": {},
+            "task": {
+                "red_briefing": "Tier 2 briefing",
+                "blue_briefing": "Tier 2 blue briefing",
+            },
+        }
+    )
+
+    async def fake_acompletion(**kwargs):
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=raw))]
+        )
+
+    monkeypatch.setattr(builder_module, "litellm", SimpleNamespace(acompletion=fake_acompletion))
+
+    builder = builder_module.LLMSnapshotBuilder(model="azure/gpt-5.2-codex", max_retries=1)
+    spec = await builder.build(tier2_manifest, BuildContext(seed=7, tier=2))
+    assert spec.topology["tier"] == tier2_manifest["tier"]
+    assert spec.topology["difficulty"] == tier2_manifest["difficulty"]
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +262,28 @@ async def test_template_builder_has_task_briefings(tier1_manifest):
     spec = await builder.build(tier1_manifest, ctx)
     assert spec.task.red_briefing != ""
     assert spec.task.blue_briefing != ""
+
+
+@pytest.mark.asyncio
+async def test_template_builder_populates_challenge_catalog(tier1_manifest):
+    from open_range.builder.builder import TemplateOnlyBuilder
+
+    spec = await TemplateOnlyBuilder().build(tier1_manifest, BuildContext(seed=42, tier=1))
+    assert spec.challenges
+    assert spec.challenges[0].linked_vulns
+    assert spec.challenges[0].linked_flags
+    assert spec.challenges[0].role_briefings["red"] == spec.task.red_briefing
+
+
+@pytest.mark.asyncio
+async def test_template_builder_populates_service_instances(tier1_manifest):
+    from open_range.builder.builder import TemplateOnlyBuilder
+
+    spec = await TemplateOnlyBuilder().build(tier1_manifest, BuildContext(seed=42, tier=1))
+    assert spec.service_instances
+    hosts = {instance.host for instance in spec.service_instances}
+    assert "web" in hosts
+    assert any(instance.archetype == "nginx" for instance in spec.service_instances)
 
 
 @pytest.mark.asyncio

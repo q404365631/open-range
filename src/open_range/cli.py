@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -103,6 +104,15 @@ def _write_snapshot(spec: "SnapshotSpec", output_dir: Path) -> Path:
     dest = output_dir / "spec.json"
     dest.write_text(json.dumps(spec.model_dump(), indent=2, default=str))
     return dest
+
+
+def _load_compose_file(path: Path) -> dict[str, Any]:
+    """Load a rendered docker-compose file."""
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"compose file must be a YAML mapping, got {type(data).__name__}")
+    return data
 
 
 def _parse_roles(raw: str) -> tuple[str, ...]:
@@ -226,7 +236,7 @@ def build(
 @click.option("--tool-info", multiple=True, type=click.Path(exists=True), help="Text, JSON, or YAML tool catalog file to append to generated system prompts.")
 @click.option("--temperature", default=0.2, type=float, help="Teacher sampling temperature.")
 @click.option("--max-tokens", default=512, type=int, help="Maximum completion tokens per teacher action.")
-@click.option("--template-only/--llm-builder", default=True, help="When using --manifest, build snapshots deterministically instead of via LLM.")
+@click.option("--template-only/--llm-builder", default=False, help="When using --manifest, force the deterministic template builder instead of the preferred LLM-backed path.")
 @click.option("--builder-model", default=None, help="LLM builder model when using --llm-builder.")
 @click.option("--randomize-flags/--static-flags", default=True, help="Randomize flag values per synthetic episode.")
 def synthetic_data(
@@ -440,7 +450,23 @@ def _import_check(dotted: str) -> Any:
 @click.option("-s", "--snapshot", required=True, type=click.Path(exists=True), help="Path to snapshot JSON.")
 @click.option("--checks", default=None, help="Comma-separated check names (default: all applicable).")
 @click.option("--docker/--no-docker", default=False, help="Include Docker-dependent checks (requires running containers).")
-def validate(snapshot: str, checks: str | None, docker: bool) -> None:
+@click.option("--deploy-hf", is_flag=True, default=False, help="After validation passes, publish the current app plus this snapshot to a Hugging Face Space.")
+@click.option("--hf-space", default=None, help="Hugging Face Space repo id (<user>/<space>). Defaults to $OPENRANGE_HF_SPACE.")
+@click.option("--hf-token", default=None, help="Hugging Face token. Defaults to $HF_TOKEN.")
+@click.option("--hf-create/--no-hf-create", default=True, help="Create the Space automatically if it does not exist.")
+@click.option("--hf-private/--hf-public", default=None, help="Visibility to use if the Space is created during deployment.")
+@click.option("--hf-commit-message", default=None, help="Optional commit message for the Space upload.")
+def validate(
+    snapshot: str,
+    checks: str | None,
+    docker: bool,
+    deploy_hf: bool,
+    hf_space: str | None,
+    hf_token: str | None,
+    hf_create: bool,
+    hf_private: bool | None,
+    hf_commit_message: str | None,
+) -> None:
     """Run validator checks against a snapshot.
 
     By default runs only offline checks (no Docker required). Use --docker
@@ -479,13 +505,47 @@ def validate(snapshot: str, checks: str | None, docker: bool) -> None:
         cls = _import_check(_CHECK_REGISTRY[name])
         check_instances.append(cls())
 
-    # Containers stub for offline mode, real discovery for docker mode
-    containers = ContainerSet()
-
     gate = ValidatorGate(check_instances)
     click.echo(f"Running {len(check_instances)} checks ...")
+    containers = ContainerSet()
 
-    result = _run_async(gate.validate(spec, containers))
+    if docker:
+        from open_range.builder.renderer import SnapshotRenderer
+        from open_range.server.compose_runner import ComposeProjectRunner
+
+        with tempfile.TemporaryDirectory(prefix="openrange-validate-") as tmpdir:
+            artifacts_dir = Path(tmpdir)
+            renderer = SnapshotRenderer()
+            click.echo(f"Rendering Docker artifacts to {artifacts_dir} ...")
+            try:
+                renderer.render(spec, artifacts_dir)
+            except Exception as exc:
+                click.echo(f"Error: render failed: {exc}", err=True)
+                sys.exit(1)
+
+            compose_file = artifacts_dir / "docker-compose.yml"
+            if not compose_file.exists():
+                click.echo(f"Error: no docker-compose.yml found in {artifacts_dir}", err=True)
+                sys.exit(1)
+
+            compose = _load_compose_file(compose_file)
+            snapshot_id = spec.lineage.snapshot_id or Path(snapshot).stem or "validation"
+            click.echo("Booting temporary Docker project for validation ...")
+            runner = ComposeProjectRunner()
+            project = None
+            try:
+                project = runner.boot(
+                    snapshot_id=snapshot_id,
+                    artifacts_dir=artifacts_dir,
+                    compose=compose,
+                )
+                containers = project.containers
+                result = _run_async(gate.validate(spec, containers))
+            finally:
+                if project is not None:
+                    runner.teardown(project)
+    else:
+        result = _run_async(gate.validate(spec, containers))
 
     # Print results
     for cr in result.checks:
@@ -503,6 +563,28 @@ def validate(snapshot: str, checks: str | None, docker: bool) -> None:
     else:
         click.echo(f"Validation FAILED ({result.total_time_s:.2f}s)")
         sys.exit(1)
+
+    if deploy_hf:
+        from open_range.hf_space import deploy_validated_snapshot_to_space
+
+        click.echo("Deploying validated snapshot to Hugging Face Space ...")
+        try:
+            commit = deploy_validated_snapshot_to_space(
+                snapshot,
+                space_id=hf_space,
+                token=hf_token,
+                create_repo=hf_create,
+                private=hf_private,
+                commit_message=hf_commit_message,
+            )
+        except Exception as exc:
+            click.echo(f"Error: Hugging Face deployment failed: {exc}", err=True)
+            sys.exit(1)
+
+        commit_url = getattr(commit, "commit_url", "") or getattr(commit, "pr_url", "")
+        click.echo("Hugging Face deployment complete.")
+        if commit_url:
+            click.echo(f"  Commit: {commit_url}")
 
 
 # ---------------------------------------------------------------------------

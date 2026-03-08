@@ -8,7 +8,7 @@ OpenRange has four pluggable Protocol-based components:
 |-----------|------|-----------|---------|
 | **Builder** | Generate snapshot specs from manifests | No (async between episodes) | `LLMSnapshotBuilder` via LiteLLM |
 | **NPC Behavior** | Decide NPC response to stimuli | No (async on NPC schedule) | `LLMNPCAgent` via LiteLLM |
-| **Validator Checks** | Admission gate checks | No (async between episodes) | 6 mechanical + 2 LLM advisory |
+| **Validator Checks** | Admission gate checks | No (async between episodes) | 13 mechanical + 2 LLM advisory |
 | **RangeAgent** | Red/Blue agent playing in episodes | Yes (in episode step loop) | `LLMRangeAgent` via LiteLLM |
 
 The first three are **infrastructure components** that happen to use LLMs. `RangeAgent` is the training/evaluation agent interface (Red or Blue).
@@ -184,7 +184,7 @@ class LLMSnapshotBuilder:
         max_retries: int = 3,
     ):
         self.model = model or os.environ.get(
-            "OPENRANGE_BUILDER_MODEL", "anthropic/claude-sonnet-4-20250514"
+            "OPENRANGE_BUILDER_MODEL", "azure/gpt-5.2-codex"
         )
         ...
 
@@ -229,7 +229,7 @@ class LLMNPCAgent:
         temperature: float = 0.3,
     ) -> None:
         self.model = model or os.environ.get(
-            "OPENRANGE_NPC_MODEL", "anthropic/claude-haiku-4-5-20251001"
+            "OPENRANGE_NPC_MODEL", "azure/gpt-5.2-codex"
         )
         ...
 
@@ -267,29 +267,36 @@ class NullNPCBehavior:
 Each check is a separate class in `src/open_range/validator/`. The validator pipeline is a **list of checks** -- add, remove, or reorder via config.
 
 ```python
-# Mechanical checks (no LLM)
-class BuildBootCheck:          # validator/build_boot.py — docker compose up + healthchecks
+# Graph checks (no containers needed)
+class ManifestComplianceCheck:          # validator/manifest_compliance.py
+    async def check(self, snapshot, containers) -> CheckResult: ...
+class GraphConsistencyCheck:            # validator/graph_consistency.py
+    async def check(self, snapshot, containers) -> CheckResult: ...
+class PathSolvabilityCheck:             # validator/path_solvability.py
+    async def check(self, snapshot, containers) -> CheckResult: ...
+class GraphEvidenceSufficiencyCheck:    # validator/graph_evidence.py
+    async def check(self, snapshot, containers) -> CheckResult: ...
+class GraphRewardGroundingCheck:        # validator/graph_reward_grounding.py
     async def check(self, snapshot, containers) -> CheckResult: ...
 
-class ExploitabilityCheck:     # validator/exploitability.py — golden path end-to-end
+# Structural / task checks
+class TaskFeasibilityCheck:    # validator/task_feasibility.py
+    async def check(self, snapshot, containers) -> CheckResult: ...
+class DifficultyCheck:         # validator/difficulty.py
     async def check(self, snapshot, containers) -> CheckResult: ...
 
+# Live container checks (training profile)
+class BuildBootCheck:          # validator/build_boot.py
+    async def check(self, snapshot, containers) -> CheckResult: ...
+class ExploitabilityCheck:     # validator/exploitability.py
+    async def check(self, snapshot, containers) -> CheckResult: ...
 class PatchabilityCheck:       # validator/patchability.py — inverse mutation test
     async def check(self, snapshot, containers) -> CheckResult: ...
-
-class EvidenceCheck:           # validator/evidence.py — logs + alerts exist
+class EvidenceCheck:           # validator/evidence.py
     async def check(self, snapshot, containers) -> CheckResult: ...
-
-class RewardGroundingCheck:    # validator/reward_grounding.py — rubrics produce valid scores
+class RewardGroundingCheck:    # validator/reward_grounding.py
     async def check(self, snapshot, containers) -> CheckResult: ...
-
-class IsolationCheck:          # validator/isolation.py — zones enforced, no leaks
-    async def check(self, snapshot, containers) -> CheckResult: ...
-
-class TaskFeasibilityCheck:    # validator/task_feasibility.py — tasks reference real hosts
-    async def check(self, snapshot, containers) -> CheckResult: ...
-
-class DifficultyCheck:         # validator/difficulty.py — golden path steps within tier target
+class IsolationCheck:          # validator/isolation.py
     async def check(self, snapshot, containers) -> CheckResult: ...
 
 # LLM checks (advisory — failure triggers retry, never blocks)
@@ -297,7 +304,7 @@ class NPCConsistencyCheck:     # validator/npc_consistency.py
     """Tests NPC personas with calibrated phishing stimuli via LLM."""
     def __init__(self, model: str | None = None):
         self.model = model or os.environ.get(
-            "OPENRANGE_NPC_MODEL", "anthropic/claude-haiku-4-5-20251001"
+            "OPENRANGE_NPC_MODEL", "azure/gpt-5.2-codex"
         )
 
     async def check(self, snapshot, containers) -> CheckResult: ...
@@ -307,7 +314,7 @@ class RealismReviewCheck:      # validator/realism_review.py
     never overrides mechanical pass. Remove from check list to skip."""
     def __init__(self, model: str | None = None):
         self.model = model or os.environ.get(
-            "OPENRANGE_VALIDATOR_MODEL", "anthropic/claude-haiku-4-5-20251001"
+            "OPENRANGE_VALIDATOR_MODEL", "azure/gpt-5.2-codex"
         )
 
     async def check(self, snapshot, containers) -> CheckResult: ...
@@ -323,7 +330,7 @@ agents:
   builder:
     class: open_range.builder.builder.LLMSnapshotBuilder
     kwargs:
-      model: "anthropic/claude-sonnet-4-20250514"
+      model: "azure/gpt-5.2-codex"
       prompt_template: "prompts/builder_v2.txt"
       temperature: 0.7
       max_retries: 3
@@ -331,7 +338,7 @@ agents:
   npc_behavior:
     class: open_range.builder.npc.npc_agent.LLMNPCAgent
     kwargs:
-      model: "anthropic/claude-haiku-4-5-20251001"
+      model: "azure/gpt-5.2-codex"
       temperature: 0.3
 
   validator_checks:
@@ -345,10 +352,10 @@ agents:
     - class: open_range.validator.difficulty.DifficultyCheck
     - class: open_range.validator.npc_consistency.NPCConsistencyCheck  # LLM advisory
       kwargs:
-        model: "anthropic/claude-haiku-4-5-20251001"
+        model: "azure/gpt-5.2-codex"
     - class: open_range.validator.realism_review.RealismReviewCheck  # LLM advisory, remove to skip
       kwargs:
-        model: "anthropic/claude-haiku-4-5-20251001"
+        model: "azure/gpt-5.2-codex"
 ```
 
 ### Override via Environment Variables
@@ -357,8 +364,8 @@ LiteLLM model strings can always be overridden by env vars (useful for CI, testi
 
 | Env Var | Overrides | Example |
 |---------|-----------|---------|
-| `OPENRANGE_BUILDER_MODEL` | Builder model | `gpt-4o`, `ollama/llama3`, `anthropic/claude-sonnet-4-20250514` |
-| `OPENRANGE_NPC_MODEL` | NPC model | `anthropic/claude-haiku-4-5-20251001`, `ollama/phi3` |
+| `OPENRANGE_BUILDER_MODEL` | Builder model | `azure/gpt-5.2-codex`, `ollama/llama3`, `anthropic/claude-sonnet-4-20250514` |
+| `OPENRANGE_NPC_MODEL` | NPC model | `azure/gpt-5.2-codex`, `anthropic/claude-haiku-4-5-20251001`, `ollama/phi3` |
 | `LITELLM_API_KEY` | Global API key | (or model-specific: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) |
 
 Env vars take precedence over YAML config. This lets you define the architecture in YAML but swap models at deploy time.
@@ -446,7 +453,7 @@ def build_components(config: dict) -> tuple[SnapshotBuilder, NPCBehavior, list[V
     Defaults when no config provided:
       builder  -> open_range.builder.builder.LLMSnapshotBuilder
       npc      -> open_range.builder.npc.npc_agent.NullNPCBehavior
-      checks   -> DEFAULT_CHECKS (6 mechanical checks)
+      checks   -> DEFAULT_CHECKS (profile-dependent)
     """
     builder_cfg = config.get("builder", {})
     builder = resolve_component(
@@ -473,7 +480,7 @@ def build_components(config: dict) -> tuple[SnapshotBuilder, NPCBehavior, list[V
     return builder, npc, checks
 ```
 
-The `DEFAULT_CHECKS` list (used when no `validator_checks` key is present in config) includes the 6 mechanical checks: `BuildBootCheck`, `ExploitabilityCheck`, `PatchabilityCheck`, `EvidenceCheck`, `RewardGroundingCheck`, `IsolationCheck`. The LLM advisory checks (`NPCConsistencyCheck`, `RealismReviewCheck`) and additional mechanical checks (`TaskFeasibilityCheck`, `DifficultyCheck`) must be explicitly added via config.
+The `DEFAULT_CHECKS` list (used when no `validator_checks` key is present in config) varies by validator profile. The `training` profile registers all checks including live container-backed ones. The `offline` profile registers only graph and structural checks. LLM advisory checks (`NPCConsistencyCheck`, `RealismReviewCheck`) must be explicitly added via config.
 
 ## How Components Wire Together
 

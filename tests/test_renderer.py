@@ -187,8 +187,13 @@ def test_render_produces_all_files(renderer, sqli_spec):
         renderer.render(sqli_spec, out)
         expected_files = [
             "docker-compose.yml",
+            "Dockerfile.attacker",
             "Dockerfile.web",
             "Dockerfile.db",
+            "Dockerfile.firewall",
+            "Dockerfile.jumpbox",
+            "Dockerfile.siem",
+            "Dockerfile.vpn",
             "nginx.conf",
             "init.sql",
             "iptables.rules",
@@ -282,18 +287,31 @@ def test_compose_web_healthcheck_accepts_pre_overlay_http_statuses(renderer, sql
         assert 'curl", "-sf", "http://localhost/"' not in compose
 
 
-def test_compose_attacker_has_routed_host_aliases_and_nmap_runtime_lib(renderer, sqli_spec):
+def test_compose_attacker_uses_prebuilt_tool_image_and_routed_host_aliases(renderer, sqli_spec):
     with tempfile.TemporaryDirectory() as tmpdir:
         out = Path(tmpdir) / "out"
         renderer.render(sqli_spec, out)
         compose = (out / "docker-compose.yml").read_text()
-        assert "libblas3 nmap" in compose
+        attacker = (out / "Dockerfile.attacker").read_text()
+        assert "dockerfile: Dockerfile.attacker" in compose
+        assert "libblas3" in attacker
+        assert "nmap" in attacker
         assert 'extra_hosts:' in compose
         assert '"web:10.0.1.10"' in compose
         assert '"db:10.0.2.20"' in compose
         assert '"files:10.0.2.21"' in compose
         assert "nmap --version" in compose
-        assert "iptables -C FORWARD" in compose
+        assert "/usr/sbin/ip route" in compose
+
+
+def test_compose_firewall_uses_sysctl_and_absolute_iptables(renderer, sqli_spec):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir) / "out"
+        renderer.render(sqli_spec, out)
+        compose = (out / "docker-compose.yml").read_text()
+        assert "dockerfile: Dockerfile.firewall" in compose
+        assert "net.ipv4.ip_forward=1" in compose
+        assert "/usr/sbin/iptables -C FORWARD" in compose
 
 
 # ---------------------------------------------------------------------------
@@ -545,9 +563,10 @@ async def test_builder_to_renderer_pipeline(tier1_manifest):
         out = Path(tmpdir) / "pipeline_out"
         renderer.render(spec, out)
 
-        # All 6 artifacts should exist
+        # All rendered artifacts should exist
         for fname in [
-            "docker-compose.yml", "Dockerfile.web", "Dockerfile.db",
+            "docker-compose.yml", "Dockerfile.attacker", "Dockerfile.web", "Dockerfile.db",
+            "Dockerfile.firewall", "Dockerfile.jumpbox", "Dockerfile.siem", "Dockerfile.vpn",
             "nginx.conf", "init.sql", "iptables.rules",
         ]:
             assert (out / fname).exists(), f"Missing: {fname}"

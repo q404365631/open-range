@@ -17,6 +17,7 @@ from open_range.protocols import (
     FlagSpec,
     GoldenPathStep,
     NPCPersona,
+    ServiceInstance,
     SnapshotSpec,
     Vulnerability,
 )
@@ -113,6 +114,12 @@ class TestRealLLMOutput:
         assert "Meridian" in spec.task.red_briefing
         assert spec.task.blue_briefing != ""
 
+    def test_default_challenge_catalog_is_backfilled(self, llm_json):
+        spec = _parse_llm_response(llm_json)
+        assert spec.challenges
+        assert spec.challenges[0].linked_vulns
+        assert spec.challenges[0].linked_flags
+
     def test_npc_personas(self, llm_json):
         spec = _parse_llm_response(llm_json)
         assert len(spec.npc_personas) == 8
@@ -207,6 +214,44 @@ class TestExploitStepFieldMappings:
         assert ec.command == "nmap -sV ..."
         assert ec.description == "port scan"
 
+
+class TestBuilderContractFallbacks:
+    def test_logs_when_service_instances_and_challenges_are_backfilled(self, caplog):
+        raw = _minimal_json(
+            topology={"hosts": ["web"], "zones": {"dmz": ["web"]}},
+            truth_graph={
+                "vulns": [
+                    {
+                        "id": "V1",
+                        "type": "sqli",
+                        "host": "web",
+                        "service": "nginx",
+                        "injection_point": "/search?q=",
+                    }
+                ],
+                "exploit_chain": [],
+            },
+            flags=[{"id": "flag1", "value": "FLAG{test}", "path": "/tmp/flag.txt", "host": "web"}],
+            task={
+                "red_briefing": "Investigate the web tier.",
+                "blue_briefing": "Monitor the environment.",
+            },
+        )
+
+        with caplog.at_level("WARNING"):
+            spec = _parse_llm_response(raw)
+
+        assert spec.service_instances
+        assert spec.challenges
+        assert "omitted service_instances" in caplog.text
+        assert "omitted challenges" in caplog.text
+
+    def test_extracts_json_when_wrapped_in_prose(self):
+        wrapped = 'Here is the snapshot JSON:\n```json\n' + _minimal_json(task={"red_briefing": "A", "blue_briefing": "B"}) + '\n```\nUse it carefully.'
+        spec = _parse_llm_response(wrapped)
+        assert isinstance(spec, SnapshotSpec)
+        assert spec.task.red_briefing == "A"
+
     def test_canonical_names_take_precedence(self):
         """When both canonical and alias are present, canonical wins (via get order)."""
         raw = _minimal_json(
@@ -229,6 +274,58 @@ class TestExploitStepFieldMappings:
         assert ec.vuln_id == "canonical"
         assert ec.command == "canonical_cmd"
         assert ec.description == "canonical_desc"
+
+
+class TestExtendedSnapshotFields:
+    def test_service_instances_parse(self):
+        raw = _minimal_json(
+            topology={"hosts": ["web", "db"]},
+            service_instances=[
+                {
+                    "instance_id": "web:nginx",
+                    "host": "web",
+                    "service_name": "nginx",
+                    "archetype": "nginx",
+                    "image": "nginx:1.25",
+                    "ports": [80],
+                    "env_vars": {"SERVER_NAME": "portal.local"},
+                }
+            ],
+        )
+        spec = _parse_llm_response(raw)
+        assert spec.service_instances == [
+            ServiceInstance(
+                instance_id="web:nginx",
+                host="web",
+                service_name="nginx",
+                archetype="nginx",
+                image="nginx:1.25",
+                ports=[80],
+                env_vars={"SERVER_NAME": "portal.local"},
+            )
+        ]
+
+    def test_challenges_sync_back_to_legacy_task(self):
+        raw = _minimal_json(
+            challenges=[
+                {
+                    "id": "challenge_web_entry",
+                    "challenge_type": "exploit",
+                    "roles": ["red", "blue"],
+                    "role_briefings": {
+                        "red": "Pivot from the DMZ into internal services.",
+                        "blue": "Watch for suspicious lateral movement.",
+                    },
+                    "linked_vulns": ["V1"],
+                    "linked_flags": ["flag1"],
+                    "success_conditions": [{"type": "flag", "value": "FLAG{x}"}],
+                }
+            ],
+        )
+        spec = _parse_llm_response(raw)
+        assert spec.challenges[0].id == "challenge_web_entry"
+        assert spec.task.red_briefing == "Pivot from the DMZ into internal services."
+        assert spec.task.blue_briefing == "Watch for suspicious lateral movement."
 
 
 # ---------------------------------------------------------------------------

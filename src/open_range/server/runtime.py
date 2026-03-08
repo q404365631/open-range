@@ -25,7 +25,7 @@ from typing import Any
 
 import yaml
 
-from open_range.builder.builder import LLMSnapshotBuilder, TemplateOnlyBuilder
+from open_range.builder.builder import TemplateOnlyBuilder, default_snapshot_builder
 from open_range.builder.mutation_policy import PopulationMutationPolicy
 from open_range.builder.mutator import Mutator
 from open_range.builder.renderer import PAYLOAD_MANIFEST_NAME, SnapshotRenderer
@@ -323,15 +323,7 @@ class StructuralSnapshotCheck:
 
 
 def _default_builder() -> SnapshotBuilder:
-    mode = os.getenv("OPENRANGE_RUNTIME_BUILDER", "template").strip().lower()
-    if mode == "template":
-        return TemplateOnlyBuilder()
-    if mode == "llm":
-        return LLMSnapshotBuilder()
-    raise ValueError(
-        f"Unsupported OPENRANGE_RUNTIME_BUILDER={mode!r}. "
-        "Expected 'template' or 'llm'."
-    )
+    return TemplateOnlyBuilder()
 
 
 def _normalize_validator_profile(profile: str | None) -> str:
@@ -532,6 +524,10 @@ class ManagedSnapshotRuntime:
         return cls(
             manifest_path=os.getenv("OPENRANGE_RUNTIME_MANIFEST"),
             store_dir=os.getenv("OPENRANGE_SNAPSHOT_DIR"),
+            builder=default_snapshot_builder(
+                os.getenv("OPENRANGE_RUNTIME_BUILDER", "auto"),
+                reason="managed runtime",
+            ),
             validator_profile=profile,
             allow_insecure_offline_profile=_non_live_opt_out_enabled(),
             pool_size=_env_int("OPENRANGE_SNAPSHOT_POOL_SIZE", 3),

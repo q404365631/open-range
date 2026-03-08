@@ -27,6 +27,7 @@ from open_range.builder.service_manifest import (
 )
 from open_range.protocols import (
     ReadinessCheck,
+    ServiceInstance,
     ServiceSpec,
     SnapshotSpec,
     TaskSpec,
@@ -306,6 +307,24 @@ class TestGenerateFromCompose:
         assert {spec.host for spec in specs} == {"web1", "web2"}
         assert all(spec.daemon == "nginx" for spec in specs)
 
+    def test_explicit_service_instances_take_precedence(self):
+        specs = generate_service_specs(
+            {},
+            {"hosts": ["web"]},
+            service_instances=[
+                ServiceInstance(
+                    instance_id="web:nginx",
+                    host="web",
+                    service_name="nginx",
+                    archetype="nginx",
+                    env_vars={"SERVER_NAME": "portal.local"},
+                )
+            ],
+        )
+        assert len(specs) == 1
+        assert specs[0].daemon == "nginx"
+        assert specs[0].env_vars["SERVER_NAME"] == "portal.local"
+
 
 # ---------------------------------------------------------------------------
 # generate_service_specs() — topology fallback
@@ -560,6 +579,7 @@ class TestRendererServiceGeneration:
 
         # After rendering, services should be populated
         assert len(spec.services) >= 2
+        assert spec.service_instances
         daemon_names = {s.daemon for s in spec.services}
         assert "nginx" in daemon_names
         assert "mysqld" in daemon_names

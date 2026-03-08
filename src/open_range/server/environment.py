@@ -48,8 +48,9 @@ def _install_zombie_reaper() -> None:
 if os.getpid() == 1:
     _install_zombie_reaper()
 
-from openenv.core.env_server.interfaces import Environment
-from openenv.core.env_server.types import EnvironmentMetadata
+from openenv.core.env_server.mcp_environment import MCPEnvironment
+from openenv.core.env_server.mcp_types import CallToolAction, ListToolsAction
+from openenv.core.env_server.types import Action, EnvironmentMetadata, Observation
 
 from open_range.models import RangeAction, RangeObservation, RangeState
 from open_range.protocols import ReadinessCheck, ServiceSpec, SnapshotSpec, TaskSpec
@@ -103,37 +104,199 @@ def _tokenize_finding_text(text: str) -> set[str]:
     tokens = {m.group(0).lower() for m in _FINDING_TOKEN_RE.finditer(text.lower())}
     return {token for token in tokens if token not in _FINDING_STOPWORDS}
 
-class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
-    """OpenEnv Environment subclass for the cybersecurity range.
+class RangeEnvironment(MCPEnvironment):
+    """OpenEnv MCPEnvironment subclass for the cybersecurity range.
 
-    Manages episode lifecycle, command routing, action tracking, and
-    reward computation for Red/Blue tandem training.
+    Agents can interact via two paths:
+
+    - **Text commands**: ``RangeAction(command="nmap -sV ...", mode="red")``
+    - **MCP tool calls**: ``CallToolAction(tool_name="run_command", ...)``
+
+    Both paths route to the same Docker exec / subprocess backend.
     """
 
     SUPPORTS_CONCURRENT_SESSIONS = False
 
     def get_metadata(self) -> EnvironmentMetadata:
-        """Return environment metadata for /metadata endpoint.
-
-        Matches OpenEnv's EnvironmentMetadata schema.
-        """
         return EnvironmentMetadata(
             name="open_range",
             version="0.1.0",
             description="Multi-agent cybersecurity gymnasium built on OpenEnv",
         )
 
+    def _build_mcp_server(self) -> "Any":
+        """Create FastMCP server with range tools.
+
+        Tool names follow open-trajectory-gym canonical names
+        (``shell_command``, ``submit_flag``, ``read_file``, ``grep``,
+        ``python_code``) for SFT data compatibility.
+        """
+        from fastmcp import FastMCP
+
+        mcp = FastMCP("open_range")
+        env = self
+
+        # -- Execution tools (trajgym-compatible) ------------------------------
+
+        @mcp.tool
+        def shell_command(command: str, mode: str = "red") -> str:
+            """Execute a shell command on your workstation.
+
+            Red runs on the attacker container (nmap, curl, sqlmap, ssh,
+            hydra, smbclient, etc.).  Blue runs on the SIEM container
+            (grep, awk, jq, curl, ssh, python3, etc.).
+
+            Args:
+                command: Shell command string.
+                mode: ``"red"`` (attacker) or ``"blue"`` (siem).
+            """
+            action = RangeAction(command=command, mode=mode)  # type: ignore[arg-type]
+            obs = env._step_impl(action)
+            parts = [obs.stdout]
+            if obs.stderr:
+                parts.append(f"STDERR: {obs.stderr}")
+            return "\n".join(parts)
+
+        @mcp.tool
+        def python_code(code: str, timeout: int = 120) -> str:
+            """Execute Python code on your workstation.
+
+            Runs ``python3 -c <code>`` in the active container.
+
+            Args:
+                code: Python source code to execute.
+                timeout: Execution timeout in seconds (1-120).
+            """
+            escaped = code.replace("'", "'\\''")
+            action = RangeAction(
+                command=f"python3 -c '{escaped}'",
+                mode="red",
+            )  # type: ignore[arg-type]
+            obs = env._step_impl(action, timeout_s=float(min(timeout, 120)))
+            parts = [obs.stdout]
+            if obs.stderr:
+                parts.append(f"STDERR: {obs.stderr}")
+            return "\n".join(parts)
+
+        # -- Flag submission ---------------------------------------------------
+
+        @mcp.tool
+        def submit_flag(flag: str) -> str:
+            """Submit a captured flag for verification.
+
+            Correct flags earn reward.  Incorrect flags incur a -0.3
+            hallucination penalty.
+
+            Args:
+                flag: The flag string (e.g. ``"FLAG{idor_2_db}"``).
+            """
+            action = RangeAction(command=f"submit_flag {flag}", mode="red")  # type: ignore[arg-type]
+            obs = env._step_impl(action)
+            return obs.stdout
+
+        # -- Blue meta-commands ------------------------------------------------
+
+        @mcp.tool
+        def submit_finding(description: str) -> str:
+            """Report a detected attack for detection reward scoring.
+
+            Accurate findings (matching real Red actions in the logs)
+            earn reward.  False positives incur a -0.2 penalty.
+
+            Args:
+                description: What was detected, with evidence from logs.
+            """
+            action = RangeAction(command=f"submit_finding {description}", mode="blue")  # type: ignore[arg-type]
+            obs = env._step_impl(action)
+            return obs.stdout
+
+        # -- Episode context ---------------------------------------------------
+
+        @mcp.tool
+        def get_challenge(role: str = "red") -> str:
+            """Get the challenge briefing and objectives for your role.
+
+            Returns the task description, milestones, and success
+            conditions.  Call this to review your objectives mid-episode.
+
+            Args:
+                role: ``"red"`` or ``"blue"``.
+            """
+            snap = env._snapshot
+            if snap is None or snap.task is None:
+                return "No challenge loaded. Call reset() first."
+            task = snap.task
+            briefing = task.red_briefing if role == "red" else task.blue_briefing
+            parts = [briefing or "(no briefing)"]
+            if task.milestones:
+                parts.append("\nMilestones:")
+                for i, m in enumerate(task.milestones, 1):
+                    done = m in env._state.milestones_completed
+                    mark = "[x]" if done else "[ ]"
+                    parts.append(f"  {mark} {i}. {m}")
+            if task.success_conditions:
+                parts.append("\nSuccess conditions:")
+                for sc in task.success_conditions:
+                    parts.append(f"  - {sc}")
+            return "\n".join(parts)
+
+        @mcp.tool
+        def get_progress() -> str:
+            """Get current episode progress.
+
+            Returns step count, flags captured, milestones completed,
+            and active sessions.
+            """
+            s = env._state
+            total_flags = len(env._snapshot.flags) if env._snapshot else 0
+            parts = [
+                f"Episode: {s.episode_id or '(none)'}",
+                f"Tier: {s.tier}",
+                f"Steps: {s.step_count} / {env._max_steps}",
+                f"Flags: {len(s.flags_found)} / {total_flags}",
+            ]
+            if s.flags_found:
+                parts.append(f"  captured: {s.flags_found}")
+            if s.milestones_completed:
+                parts.append(f"Milestones completed: {s.milestones_completed}")
+            if s.active_sessions:
+                parts.append(f"Active sessions: {s.active_sessions}")
+            return "\n".join(parts)
+
+        # -- Infrastructure ----------------------------------------------------
+
+        @mcp.tool
+        def check_services() -> str:
+            """Check health status of all range services.
+
+            Returns the up/down status of each container.  Blue's
+            availability reward depends on services staying up after
+            defensive actions.
+            """
+            env._refresh_services_status()
+            status = env._state.services_status
+            if not status:
+                return "No services status available."
+            lines = [f"  {svc}: {st}" for svc, st in sorted(status.items())]
+            return "Service Status:\n" + "\n".join(lines)
+
+        return mcp
+
     def __init__(
         self,
         runtime: "ManagedSnapshotRuntime | None" = None,
+        default_snapshot: SnapshotSpec | None = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         exec_timeout: float = EXEC_TIMEOUT,
         docker_available: bool | None = None,
         execution_mode: str = "auto",
     ) -> None:
-        super().__init__()
+        super().__init__(self._build_mcp_server())
         self._state = RangeState()
         self._snapshot: SnapshotSpec | None = None
+        self._default_snapshot = (
+            default_snapshot.model_copy(deep=True) if default_snapshot is not None else None
+        )
         self._snapshot_id: str | None = None
         self._red_history: list[dict[str, Any]] = []
         self._blue_history: list[dict[str, Any]] = []
@@ -950,6 +1113,9 @@ class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
         if "snapshot" in kwargs and isinstance(kwargs["snapshot"], SnapshotSpec):
             self._snapshot_id = kwargs.get("snapshot_id")
             snap = kwargs["snapshot"]
+        elif self._default_snapshot is not None:
+            snap = self._default_snapshot.model_copy(deep=True)
+            self._snapshot_id = kwargs.get("snapshot_id") or snap.lineage.snapshot_id or None
         elif self._runtime is not None:
             if "snapshot_id" in kwargs and kwargs["snapshot_id"]:
                 admitted = self._runtime.get_snapshot(str(kwargs["snapshot_id"]))
@@ -960,8 +1126,9 @@ class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
         else:
             raise RuntimeError(
                 "No snapshot source available. Provide a snapshot via "
-                "kwargs['snapshot'], set OPENRANGE_RUNTIME_MANIFEST to enable "
-                "the managed runtime, or pass a runtime to the constructor."
+                "kwargs['snapshot'], set OPENRANGE_RUNTIME_SNAPSHOT or "
+                "OPENRANGE_RUNTIME_MANIFEST, or pass a runtime/default snapshot "
+                "to the constructor."
             )
 
         # Defensive: ensure required fields are not None
@@ -1485,23 +1652,27 @@ class RangeEnvironment(Environment[RangeAction, RangeObservation, RangeState]):
 
     def step(
         self,
+        action: Action,
+        timeout_s: float | None = None,
+        **kwargs: Any,
+    ) -> Observation:
+        """Route MCP tool calls or text commands.
+
+        ``ListToolsAction`` and ``CallToolAction`` are handled by the
+        ``MCPEnvironment`` base class.  ``RangeAction`` text commands
+        are forwarded to ``_step_impl``.
+        """
+        if isinstance(action, (ListToolsAction, CallToolAction)):
+            return super().step(action, timeout_s=timeout_s, **kwargs)
+        return self._step_impl(action, timeout_s=timeout_s, **kwargs)
+
+    def _step_impl(
+        self,
         action: RangeAction,
         timeout_s: float | None = None,
         **kwargs: Any,
     ) -> RangeObservation:
-        """Execute an agent action against the range.
-
-        Routes the command to the appropriate container, logs it for
-        cross-role reward coupling, computes rewards, and checks
-        termination conditions.
-
-        Args:
-            action: The agent's action (command + mode).
-            timeout_s: Optional per-step timeout override.
-
-        Returns:
-            RangeObservation with command output and reward.
-        """
+        """Execute a text-command action against the range."""
         if self._snapshot is None:
             self._snapshot = self._select_snapshot(**kwargs)
             tier = self._snapshot.topology.get("tier", 1) if isinstance(

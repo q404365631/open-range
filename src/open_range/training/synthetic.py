@@ -19,7 +19,7 @@ from open_range.agents.llm_agent import LLMRangeAgent
 from open_range.agents.parsing import strip_command_from_response
 from open_range.agents.protocol import RangeAgent
 from open_range.agents.replay_agent import ScriptedBlueAgent, ScriptedRedAgent
-from open_range.builder.builder import LLMSnapshotBuilder, TemplateOnlyBuilder
+from open_range.builder.builder import TemplateOnlyBuilder, default_snapshot_builder
 from open_range.protocols import BuildContext, SnapshotBuilder, SnapshotSpec, Vulnerability
 from open_range.server.environment import RangeEnvironment
 from open_range.models import RangeAction, RangeObservation
@@ -788,7 +788,7 @@ class SyntheticTraceGenerator:
         blue_agent: RangeAgent | None = None,
         active_roles: tuple[str, ...] = ("red", "blue"),
         builder: SnapshotBuilder | None = None,
-        template_only: bool = True,
+        template_only: bool = False,
         builder_model: str | None = None,
         tier: int = 1,
         max_steps: int = 30,
@@ -799,8 +799,10 @@ class SyntheticTraceGenerator:
             if template_only:
                 resolved_builder = TemplateOnlyBuilder()
             else:
-                resolved_builder = LLMSnapshotBuilder(
-                    model=builder_model or "azure/gpt-5.2-codex"
+                resolved_builder = default_snapshot_builder(
+                    "auto",
+                    model=builder_model,
+                    reason="synthetic trace generation",
                 )
         return cls(
             manifest=manifest,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
+import json
 from typing import Any
 
 from fastapi import FastAPI
@@ -16,6 +17,13 @@ from open_range.client.client import OpenRangeEnv
 from open_range.models import RangeAction, RangeObservation, RangeState
 from open_range.server.app import create_app
 from open_range.server.environment import RangeEnvironment
+from openenv.core.env_server.mcp_environment import MCPEnvironment
+from openenv.core.env_server.mcp_types import (
+    CallToolAction,
+    CallToolObservation,
+    ListToolsAction,
+    ListToolsObservation,
+)
 from openenv.core.env_server.types import Action, Observation, State
 
 
@@ -136,6 +144,42 @@ class TestAppFactoryContract:
         assert "episode_id" in payload["state"]["properties"]
         assert "step_count" in payload["state"]["properties"]
 
+    def test_create_app_prefers_runtime_snapshot_over_managed_runtime(self, monkeypatch, tmp_path):
+        from open_range.protocols import SnapshotSpec
+
+        snapshot_path = tmp_path / "runtime-spec.json"
+        snapshot = SnapshotSpec(
+            topology={"hosts": ["attacker", "siem"]},
+            flags=[],
+            golden_path=[],
+            task={
+                "red_briefing": "Fixed snapshot.",
+                "blue_briefing": "Fixed snapshot.",
+            },
+        )
+        snapshot_path.write_text(
+            json.dumps(snapshot.model_dump(mode="python")),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("OPENRANGE_RUNTIME_SNAPSHOT", str(snapshot_path))
+        monkeypatch.setenv("OPENRANGE_RUNTIME_MANIFEST", "manifests/tier1_basic.yaml")
+
+        def _explode():
+            raise AssertionError("managed runtime should not be created in snapshot mode")
+
+        app_module = importlib.import_module("open_range.server.app")
+        monkeypatch.setattr(
+            "open_range.server.runtime.ManagedSnapshotRuntime.from_env",
+            _explode,
+        )
+
+        app = app_module.create_app()
+        env = app.state.env
+        assert isinstance(env, RangeEnvironment)
+        assert env._default_snapshot is not None
+        assert env._default_snapshot.task.red_briefing == "Fixed snapshot."
+
 
 class TestClientContract:
     def test_step_payload_matches_server_contract(self):
@@ -183,3 +227,149 @@ class TestClientContract:
         assert state.mode == "red"
         assert state.tier == 2
         assert state.custom_key == "value"
+
+
+class TestMCPContract:
+    """RangeEnvironment exposes tools via MCP (OpenEnv MCPEnvironment)."""
+
+    def test_inherits_mcp_environment(self):
+        assert issubclass(RangeEnvironment, MCPEnvironment)
+
+    def test_list_tools_returns_expected_tools(self):
+        env = RangeEnvironment(docker_available=False)
+        obs = env.step(ListToolsAction())
+        assert isinstance(obs, ListToolsObservation)
+        tool_names = {t.name for t in obs.tools}
+        expected = {"shell_command", "python_code", "submit_flag",
+                    "submit_finding", "check_services",
+                    "get_challenge", "get_progress"}
+        assert expected == tool_names
+
+    def test_list_tools_have_descriptions(self):
+        env = RangeEnvironment(docker_available=False)
+        obs = env.step(ListToolsAction())
+        for tool in obs.tools:
+            assert tool.description, f"Tool {tool.name} has no description"
+            assert tool.input_schema, f"Tool {tool.name} has no input schema"
+
+    def test_call_tool_shell_command(self):
+        env = RangeEnvironment(docker_available=False)
+        env.reset(snapshot=_make_minimal_snapshot())
+        obs = env.step(CallToolAction(
+            tool_name="shell_command",
+            arguments={"command": "echo hello", "mode": "red"},
+        ))
+        assert isinstance(obs, CallToolObservation)
+        assert obs.tool_name == "shell_command"
+
+    def test_call_tool_python_code(self):
+        env = RangeEnvironment(docker_available=False)
+        env.reset(snapshot=_make_minimal_snapshot())
+        obs = env.step(CallToolAction(
+            tool_name="python_code",
+            arguments={"code": "print(1+1)"},
+        ))
+        assert isinstance(obs, CallToolObservation)
+        assert obs.tool_name == "python_code"
+
+    def test_call_tool_submit_flag_valid(self):
+        env = RangeEnvironment(docker_available=False)
+        env.reset(snapshot=_make_minimal_snapshot())
+        obs = env.step(CallToolAction(
+            tool_name="submit_flag",
+            arguments={"flag": "FLAG{test}"},
+        ))
+        assert isinstance(obs, CallToolObservation)
+        assert "Correct" in str(obs.result)
+
+    def test_call_tool_submit_flag_invalid(self):
+        env = RangeEnvironment(docker_available=False)
+        env.reset(snapshot=_make_minimal_snapshot())
+        obs = env.step(CallToolAction(
+            tool_name="submit_flag",
+            arguments={"flag": "FAKE{nope}"},
+        ))
+        assert isinstance(obs, CallToolObservation)
+        assert "Invalid" in str(obs.result)
+
+    def test_call_tool_submit_finding(self):
+        env = RangeEnvironment(docker_available=False)
+        env.reset(snapshot=_make_minimal_snapshot())
+        obs = env.step(CallToolAction(
+            tool_name="submit_finding",
+            arguments={"description": "SQLi from 10.0.0.10 on /search"},
+        ))
+        assert isinstance(obs, CallToolObservation)
+        assert "recorded" in str(obs.result).lower() or "submitted" in str(obs.result).lower()
+
+    def test_call_tool_get_challenge(self):
+        env = RangeEnvironment(docker_available=False)
+        env.reset(snapshot=_make_minimal_snapshot())
+        obs = env.step(CallToolAction(
+            tool_name="get_challenge",
+            arguments={"role": "red"},
+        ))
+        assert isinstance(obs, CallToolObservation)
+        assert "Test" in str(obs.result)  # matches TaskSpec red_briefing
+
+    def test_call_tool_get_challenge_no_snapshot(self):
+        env = RangeEnvironment(docker_available=False)
+        obs = env.step(CallToolAction(
+            tool_name="get_challenge",
+            arguments={},
+        ))
+        assert isinstance(obs, CallToolObservation)
+        assert "No challenge" in str(obs.result)
+
+    def test_call_tool_get_progress(self):
+        env = RangeEnvironment(docker_available=False)
+        env.reset(snapshot=_make_minimal_snapshot())
+        obs = env.step(CallToolAction(
+            tool_name="get_progress",
+            arguments={},
+        ))
+        assert isinstance(obs, CallToolObservation)
+        result = str(obs.result)
+        assert "Steps:" in result
+        assert "Flags:" in result
+        assert "Tier:" in result
+
+    def test_call_tool_check_services(self):
+        env = RangeEnvironment(docker_available=False)
+        env.reset(snapshot=_make_minimal_snapshot())
+        obs = env.step(CallToolAction(
+            tool_name="check_services",
+            arguments={},
+        ))
+        assert isinstance(obs, CallToolObservation)
+        assert obs.tool_name == "check_services"
+
+    def test_call_tool_nonexistent_returns_error(self):
+        env = RangeEnvironment(docker_available=False)
+        obs = env.step(CallToolAction(
+            tool_name="does_not_exist",
+            arguments={},
+        ))
+        assert isinstance(obs, CallToolObservation)
+        assert obs.error is not None
+
+    def test_text_action_still_works(self):
+        """RangeAction text path is preserved alongside MCP."""
+        env = RangeEnvironment(docker_available=False)
+        env.reset(snapshot=_make_minimal_snapshot())
+        obs = env.step(RangeAction(command="echo test", mode="red"))
+        assert isinstance(obs, RangeObservation)
+        assert obs.stdout  # mock mode returns non-empty
+
+
+def _make_minimal_snapshot():
+    from open_range.protocols import FlagSpec, SnapshotSpec, TaskSpec
+
+    return SnapshotSpec(
+        topology={
+            "hosts": ["attacker", "web", "db", "siem"],
+            "zones": {"external": ["attacker"], "dmz": ["web"], "internal": ["db"], "management": ["siem"]},
+        },
+        flags=[FlagSpec(id="f1", value="FLAG{test}", path="/flag.txt", host="db")],
+        task=TaskSpec(red_briefing="Test", blue_briefing="Test"),
+    )

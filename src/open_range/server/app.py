@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import inspect
 import logging
 import os
+from pathlib import Path
 
 from fastapi import FastAPI
 
@@ -33,22 +35,47 @@ def create_app() -> FastAPI:
     """Create the OpenRange app through the canonical OpenEnv factory."""
     from openenv.core.env_server import create_app as create_openenv_app
 
+    from open_range.protocols import SnapshotSpec
     from open_range.models import RangeAction, RangeObservation
     from open_range.server.environment import RangeEnvironment
 
+    default_snapshot = None
+    snapshot_env = os.getenv("OPENRANGE_RUNTIME_SNAPSHOT", "").strip()
+    if snapshot_env:
+        snapshot_path = Path(snapshot_env)
+        if snapshot_path.exists():
+            payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            default_snapshot = SnapshotSpec.model_validate(payload)
+            logger.info("OpenRange app using fixed runtime snapshot from %s", snapshot_path)
+        else:
+            logger.warning(
+                "OPENRANGE_RUNTIME_SNAPSHOT points to missing file: %s. Falling back to managed runtime selection.",
+                snapshot_path,
+            )
+
     runtime = None
-    runtime_enabled = os.getenv("OPENRANGE_ENABLE_MANAGED_RUNTIME", "").lower() in {
+    runtime_enabled = default_snapshot is None and (
+        os.getenv("OPENRANGE_ENABLE_MANAGED_RUNTIME", "").lower() in {
         "1",
         "true",
         "yes",
     } or bool(os.getenv("OPENRANGE_RUNTIME_MANIFEST"))
+    )
     if runtime_enabled:
         from open_range.server.runtime import ManagedSnapshotRuntime
 
         runtime = ManagedSnapshotRuntime.from_env()
 
     def env_factory() -> RangeEnvironment:
-        return RangeEnvironment(runtime=runtime)
+        execution_mode = os.getenv(
+            "OPENRANGE_EXECUTION_MODE",
+            "subprocess" if default_snapshot is not None else "auto",
+        )
+        return RangeEnvironment(
+            runtime=runtime,
+            default_snapshot=default_snapshot,
+            execution_mode=execution_mode,
+        )
 
     fastapp = create_openenv_app(
         env_factory,

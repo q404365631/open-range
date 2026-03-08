@@ -17,6 +17,25 @@ from open_range.training.runner import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _clear_training_builder_env(monkeypatch: pytest.MonkeyPatch):
+    for name in (
+        "OPENRANGE_TRAINING_BUILDER",
+        "OPENRANGE_BUILDER_MODEL",
+        "AZURE_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_API_BASE",
+        "AZURE_OPENAI_ENDPOINT",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "LITELLM_API_KEY",
+        "OLLAMA_HOST",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 # ---------------------------------------------------------------------------
 # Mock environment and agents
 # ---------------------------------------------------------------------------

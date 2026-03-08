@@ -408,7 +408,9 @@ class TestMultipleVulnTypes:
         with tempfile.TemporaryDirectory() as tmpdir:
             out = Path(tmpdir) / "three_vulns"
             renderer.render(spec, out)
-            for fname in ["docker-compose.yml", "Dockerfile.web", "nginx.conf",
+            for fname in ["docker-compose.yml", "Dockerfile.attacker", "Dockerfile.web",
+                          "Dockerfile.firewall", "Dockerfile.jumpbox", "Dockerfile.siem",
+                          "Dockerfile.vpn", "nginx.conf",
                           "init.sql", "iptables.rules"]:
                 assert (out / fname).exists()
 

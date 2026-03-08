@@ -28,17 +28,22 @@ except ImportError:  # pragma: no cover - exercised only without builder extra
 
 from open_range.protocols import (
     BuildContext,
+    ChallengeSpec,
     EvidenceItem,
     ExploitStep,
     FlagSpec,
     GoldenPathStep,
     NPCPersona,
     NPCTrafficSpec,
+    SnapshotBuilder,
+    ServiceInstance,
     SnapshotSpec,
     TaskSpec,
     TruthGraph,
     Vulnerability,
+    build_default_challenge_catalog,
 )
+from open_range.builder.service_catalog import infer_service_instances
 
 from open_range.builder.prompts import BUILDER_SYSTEM_PROMPT
 from open_range.builder.manifest_graph import (
@@ -47,6 +52,57 @@ from open_range.builder.manifest_graph import (
 )
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_BUILDER_MODEL = "azure/gpt-5.2-codex"
+_BUILDER_PROVIDER_ENV_VARS = (
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "LITELLM_API_KEY",
+    "OLLAMA_HOST",
+)
+
+
+def llm_builder_is_configured(*, model: str | None = None) -> bool:
+    """Return True when LLM-backed snapshot generation is plausibly configured."""
+    if litellm is None:
+        return False
+    if model and model.strip():
+        return True
+    if os.getenv("OPENRANGE_BUILDER_MODEL"):
+        return True
+    azure_key = os.getenv("AZURE_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY")
+    azure_base = os.getenv("AZURE_API_BASE") or os.getenv("AZURE_OPENAI_ENDPOINT")
+    if azure_key and azure_base:
+        return True
+    return any(os.getenv(name) for name in _BUILDER_PROVIDER_ENV_VARS)
+
+
+def default_snapshot_builder(
+    mode: str | None = None,
+    *,
+    model: str | None = None,
+    reason: str = "",
+) -> SnapshotBuilder:
+    """Resolve the default snapshot builder for runtime/training surfaces."""
+    normalized = (mode or "auto").strip().lower()
+    if normalized == "template":
+        return TemplateOnlyBuilder()
+    if normalized == "llm":
+        return LLMSnapshotBuilder(model=model)
+    if normalized != "auto":
+        raise ValueError(
+            f"Unsupported builder mode {mode!r}. Expected 'auto', 'template', or 'llm'."
+        )
+    if llm_builder_is_configured(model=model):
+        return LLMSnapshotBuilder(model=model)
+    suffix = f" for {reason}" if reason else ""
+    logger.warning(
+        "No LLM builder configuration detected%s; falling back to TemplateOnlyBuilder.",
+        suffix,
+    )
+    return TemplateOnlyBuilder()
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +184,38 @@ class _LLMTask(BaseModel):
     blue_briefing: str = ""
 
 
+class _LLMChallenge(BaseModel):
+    """Raw multi-challenge entry from LLM output."""
+
+    id: str = ""
+    name: str = ""
+    challenge_type: str = ""
+    roles: list[str] = Field(default_factory=list)
+    role_briefings: dict[str, str] = Field(default_factory=dict)
+    entry_points: list[str] = Field(default_factory=list)
+    success_conditions: list[dict[str, Any]] = Field(default_factory=list)
+    linked_vulns: list[str] = Field(default_factory=list)
+    linked_flags: list[str] = Field(default_factory=list)
+    evidence_requirements: list[str] = Field(default_factory=list)
+    difficulty: str = ""
+    prerequisites: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class _LLMServiceInstance(BaseModel):
+    """Raw service instance emitted by the LLM builder."""
+
+    instance_id: str = ""
+    host: str = ""
+    service_name: str = ""
+    archetype: str = ""
+    image: str = ""
+    ports: list[int] = Field(default_factory=list)
+    env_vars: dict[str, Any] = Field(default_factory=dict)
+    startup_contract: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class LLMSnapshotOutput(BaseModel):
     """Intermediate model matching the LLM's raw JSON schema.
 
@@ -146,6 +234,8 @@ class LLMSnapshotOutput(BaseModel):
     npc_personas: list[_LLMNPCPersona] = Field(default_factory=list)
     npc_traffic: dict[str, Any] = Field(default_factory=dict)
     task: _LLMTask = Field(default_factory=_LLMTask)
+    challenges: list[_LLMChallenge] = Field(default_factory=list)
+    service_instances: list[_LLMServiceInstance] = Field(default_factory=list)
     files: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -182,7 +272,7 @@ class LLMSnapshotBuilder:
             timeout: Timeout in seconds for each LLM call.
         """
         self.model = model or os.environ.get(
-            "OPENRANGE_BUILDER_MODEL", "azure/gpt-5.2-codex"
+            "OPENRANGE_BUILDER_MODEL", DEFAULT_BUILDER_MODEL
         )
         self.prompt_template = prompt_template or BUILDER_SYSTEM_PROMPT
         # Codex models don't support temperature; auto-set to None
@@ -275,6 +365,7 @@ class LLMSnapshotBuilder:
                     len(raw) if raw else 0,
                 )
                 spec = _parse_llm_response(raw)
+                spec = _backfill_snapshot_topology(spec, manifest, context)
                 logger.info(
                     "LLMSnapshotBuilder: build completed (attempt %d/%d, %d vulns, %d golden path steps)",
                     attempt,
@@ -362,6 +453,62 @@ class SnapshotParseError(Exception):
 # ---------------------------------------------------------------------------
 
 
+def _extract_json_object(raw_text: str) -> str:
+    """Extract the first balanced JSON object from LLM text output."""
+    text = (raw_text or "").strip()
+    if not text:
+        return text
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    if text.startswith("{"):
+        return text
+
+    start = text.find("{")
+    if start < 0:
+        return text
+
+    depth = 0
+    in_string = False
+    escape = False
+    for index, char in enumerate(text[start:], start=start):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return text
+
+
+def _backfill_snapshot_topology(
+    spec: SnapshotSpec,
+    manifest: dict[str, Any],
+    context: BuildContext,
+) -> SnapshotSpec:
+    """Preserve manifest-level topology metadata when the LLM omits it."""
+    topology = dict(spec.topology or {})
+    topology.setdefault("tier", int(manifest.get("tier", context.tier) or context.tier))
+    if "difficulty" not in topology and isinstance(manifest.get("difficulty"), dict):
+        topology["difficulty"] = deepcopy(manifest["difficulty"])
+    spec.topology = topology
+    return spec
+
+
 def _parse_llm_response(raw_json: str) -> SnapshotSpec:
     """Parse raw JSON from LLM into a validated SnapshotSpec.
 
@@ -369,6 +516,7 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
     then maps to the canonical SnapshotSpec models. Handles known field-name
     mismatches between the LLM prompt schema and Pydantic models.
     """
+    raw_json = _extract_json_object(raw_json)
     raw_snippet = raw_json[:500] if raw_json else ""
 
     try:
@@ -553,6 +701,26 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
         blue_briefing=llm_output.task.blue_briefing,
     )
 
+    challenges = [
+        ChallengeSpec(
+            id=challenge.id,
+            name=challenge.name,
+            challenge_type=challenge.challenge_type or "exploit",
+            roles=list(challenge.roles),
+            role_briefings=dict(challenge.role_briefings),
+            entry_points=list(challenge.entry_points),
+            success_conditions=list(challenge.success_conditions),
+            linked_vulns=list(challenge.linked_vulns),
+            linked_flags=list(challenge.linked_flags),
+            evidence_requirements=list(challenge.evidence_requirements),
+            difficulty=challenge.difficulty,
+            prerequisites=list(challenge.prerequisites),
+            metadata=dict(challenge.metadata),
+        )
+        for challenge in llm_output.challenges
+        if challenge.id or challenge.name or challenge.role_briefings
+    ]
+
     # Map files -- explicit files from LLM + extract from vulnerable_code
     files: dict[str, str] = {}
 
@@ -579,12 +747,42 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
                     files[container_key] = vc
 
     logger.debug(
-        "_parse_llm_response: mapped %d vulns, %d golden path steps, %d flags, %d files",
+        "_parse_llm_response: mapped %d vulns, %d golden path steps, %d flags, %d files, %d challenges",
         len(vulns),
         len(golden_path),
         len(flags),
         len(files),
+        len(challenges),
     )
+
+    service_instances = [
+        ServiceInstance(
+            instance_id=instance.instance_id,
+            host=instance.host,
+            service_name=instance.service_name,
+            archetype=instance.archetype,
+            image=instance.image,
+            ports=list(instance.ports),
+            env_vars={str(k): str(v) for k, v in instance.env_vars.items()},
+            startup_contract=dict(instance.startup_contract),
+            metadata=dict(instance.metadata),
+        )
+        for instance in llm_output.service_instances
+        if instance.host or instance.service_name or instance.archetype or instance.image
+    ]
+    if not service_instances:
+        logger.warning(
+            "LLM output omitted service_instances; inferring them from topology as a compatibility fallback."
+        )
+        service_instances = infer_service_instances(
+            compose={},
+            topology=llm_output.topology,
+        )
+    if not challenges:
+        logger.warning(
+            "LLM output omitted challenges; synthesizing a default challenge catalog as a compatibility fallback."
+        )
+        challenges = build_default_challenge_catalog(task, truth_graph, flags, evidence_spec)
 
     return SnapshotSpec(
         topology=llm_output.topology,
@@ -595,6 +793,8 @@ def _parse_llm_response(raw_json: str) -> SnapshotSpec:
         npc_personas=npc_personas,
         npc_traffic=npc_traffic,
         task=task,
+        challenges=challenges,
+        service_instances=service_instances,
         files=files,
     )
 
@@ -1116,6 +1316,17 @@ class TemplateOnlyBuilder:
             scripts=["http_traffic.sh", "db_traffic.sh"],
         )
 
+        challenges = build_default_challenge_catalog(
+            task,
+            truth_graph,
+            flags,
+            evidence_spec,
+        )
+        service_instances = infer_service_instances(
+            compose={},
+            topology=topology,
+        )
+
         snapshot = SnapshotSpec(
             topology=topology,
             truth_graph=truth_graph,
@@ -1125,6 +1336,8 @@ class TemplateOnlyBuilder:
             npc_personas=[],
             npc_traffic=npc_traffic,
             task=task,
+            challenges=challenges,
+            service_instances=service_instances,
         )
         snapshot.topology = compile_manifest_topology(manifest, snapshot.topology)
         snapshot.files = render_template_payloads(snapshot, manifest=manifest)
