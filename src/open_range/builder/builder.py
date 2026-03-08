@@ -153,7 +153,7 @@ class LLMSnapshotBuilder:
     """Generate snapshot specs via LiteLLM.
 
     Reads model from ``OPENRANGE_BUILDER_MODEL`` env var.
-    Default: ``azure/gpt-5.2-codex``.
+    Default: ``openai/gpt-5.2-codex``.
     """
 
     def __init__(
@@ -168,7 +168,7 @@ class LLMSnapshotBuilder:
         """Initialize the LLM-based snapshot builder.
 
         Args:
-            model: LiteLLM model identifier (e.g. 'azure/gpt-5.2-codex').
+            model: LiteLLM model identifier (e.g. 'openai/gpt-5.2-codex').
             prompt_template: System prompt override.
             temperature: Sampling temperature for LLM calls. None to omit
                 (required for codex models which don't support temperature).
@@ -177,7 +177,7 @@ class LLMSnapshotBuilder:
             timeout: Timeout in seconds for each LLM call.
         """
         self.model = model or os.environ.get(
-            "OPENRANGE_BUILDER_MODEL", "azure/gpt-5.2-codex"
+            "OPENRANGE_BUILDER_MODEL", "openai/gpt-5.2-codex"
         )
         self.prompt_template = prompt_template or BUILDER_SYSTEM_PROMPT
         # Codex models don't support temperature; auto-set to None
@@ -270,12 +270,18 @@ class LLMSnapshotBuilder:
                     len(raw) if raw else 0,
                 )
                 spec = _parse_llm_response(raw)
+                # Hydrate topology with manifest graph (dependency_edges,
+                # trust_edges, principal_catalog, host_catalog) so the
+                # validator's path_solvability check can verify reachability.
+                from open_range.builder.manifest_graph import compile_manifest_topology
+                spec.topology = compile_manifest_topology(manifest, spec.topology)
                 logger.info(
-                    "LLMSnapshotBuilder: build completed (attempt %d/%d, %d vulns, %d golden path steps)",
+                    "LLMSnapshotBuilder: build completed (attempt %d/%d, %d vulns, %d golden path steps, %d dep edges)",
                     attempt,
                     self.max_retries,
                     len(spec.truth_graph.vulns),
                     len(spec.golden_path),
+                    len(spec.topology.get("dependency_edges", [])),
                 )
                 return spec
 

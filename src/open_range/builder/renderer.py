@@ -253,16 +253,21 @@ class KindRenderer:
         name: str,
         spec: SnapshotSpec,
     ) -> list[dict[str, str]]:
-        """Extract payload file mounts for a given container."""
-        payloads: list[dict[str, str]] = []
+        """Extract payload file mounts for a given container.
+
+        Deduplicates by mountPath — last writer wins for content, but
+        each mountPath appears only once (K8s rejects duplicate volumeMounts).
+        """
+        by_mount: dict[str, dict[str, str]] = {}
 
         # Inject base DB schema so LLM-generated SQL can reference tables
         if name == "db":
-            payloads.append({
+            mp = "/docker-entrypoint-initdb.d/00-base-schema.sql"
+            by_mount[mp] = {
                 "key": "00-base-schema.sql",
-                "mountPath": "/docker-entrypoint-initdb.d/00-base-schema.sql",
+                "mountPath": mp,
                 "content": _BASE_DB_SCHEMA,
-            })
+            }
 
         for file_key, content in spec.files.items():
             if ":" not in file_key:
@@ -277,11 +282,11 @@ class KindRenderer:
             else:
                 mount_path = path if path.startswith("/") else f"/{path}"
 
-            payloads.append({
+            by_mount[mount_path] = {
                 "key": _sanitize_key(path),
                 "mountPath": mount_path,
                 "content": content,
-            })
+            }
 
         # Flag files for this host
         for flag in spec.flags:
@@ -290,13 +295,13 @@ class KindRenderer:
                 and "/" in flag.path
                 and not flag.path.startswith("db:")
             ):
-                payloads.append({
+                by_mount.setdefault(flag.path, {
                     "key": _sanitize_key(flag.path),
                     "mountPath": flag.path,
                     "content": f"{flag.value}\n",
                 })
 
-        return payloads
+        return list(by_mount.values())
 
     # ------------------------------------------------------------------
     # Kind cluster config
