@@ -121,7 +121,7 @@ class TestNoUsers:
             assert "useradd" not in dockerfile
 
     def test_context_defaults_db_user(self):
-        """With no users, _find_db_user should return 'app_user'."""
+        """With no users, context should synthesize a service DB account."""
         spec = SnapshotSpec(
             topology=_minimal_topology(users=[]),
             truth_graph=TruthGraph(vulns=[]),
@@ -129,8 +129,9 @@ class TestNoUsers:
             golden_path=[],
         )
         ctx = _build_context(spec)
-        assert ctx["db_user"] == "app_user"
-        assert ctx["db_pass"] == "AppUs3r!2024"
+        assert ctx["db_user"] == "svc_db"
+        assert ctx["db_pass"]
+        assert ctx["db_pass"] != "AppUs3r!2024"
 
 
 # ---------------------------------------------------------------------------
@@ -612,8 +613,8 @@ class TestDBUserResolution:
             golden_path=[],
         )
         ctx = _build_context(spec)
-        # Should fall back to default since only admin user has db access
-        assert ctx["db_user"] == "app_user"
+        # Should use synthesized service account since only admin has db access.
+        assert ctx["db_user"] == "svc_db"
 
     def test_non_admin_db_user_picked(self):
         """Non-admin user with db access should be picked."""

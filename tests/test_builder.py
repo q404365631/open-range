@@ -197,6 +197,81 @@ async def test_template_builder_uses_manifest_company_context(tier1_manifest):
 
 
 @pytest.mark.asyncio
+async def test_template_builder_credential_reuse_steps_use_runtime_contract(tier1_manifest):
+    from open_range.builder.builder import TemplateOnlyBuilder
+
+    manifest = {
+        **tier1_manifest,
+        "bug_families": ["credential_reuse"],
+        "difficulty": {**tier1_manifest.get("difficulty", {}), "min_vulns": 1, "max_vulns": 1},
+    }
+    spec = await TemplateOnlyBuilder().build(manifest, BuildContext(seed=3, tier=1))
+
+    runtime = spec.topology.get("runtime_contract", {})
+    assert runtime
+    joined = "\n".join(step.command for step in spec.golden_path)
+    assert runtime["ldap_bind_dn"] in joined
+    assert runtime["credential_reuse_user"] in joined
+    assert runtime["credential_reuse_host"] in joined
+    assert "cn=webapp,dc=corp,dc=local" not in joined
+    assert "Svc!Ldap2024" not in joined
+
+    config_key = f"{runtime['web_host']}:{runtime['web_config_path']}"
+    config_payload = spec.files[config_key]
+    assert runtime["db_user"] in config_payload
+    assert runtime["db_password"] in config_payload
+    assert runtime["ldap_bind_dn"] in config_payload
+    assert runtime["ldap_bind_pw"] in config_payload
+
+
+def test_render_payloads_use_runtime_contract_paths_and_db_name():
+    from open_range.builder.builder import render_template_payloads
+    from open_range.protocols import TruthGraph, Vulnerability
+
+    snapshot = SnapshotSpec(
+        topology={
+            "tier": 1,
+            "hosts": ["frontend", "database", "directory"],
+            "org_name": "OpenRange",
+            "domain": "corp.local",
+            "runtime_contract": {
+                "domain": "corp.local",
+                "web_host": "frontend",
+                "db_host": "database",
+                "ldap_host": "directory",
+                "web_doc_root": "/srv/http/portal",
+                "web_config_path": "/srv/http/config.php",
+                "db_name": "clinic_db",
+                "db_user": "svc_portal",
+                "db_password": "SvcPortal!123",
+                "ldap_bind_dn": "cn=svc_portal,dc=corp,dc=local",
+                "ldap_bind_pw": "SvcPortal!123",
+                "ldap_search_base_dn": "dc=corp,dc=local",
+                "credential_reuse_user": "svc_portal",
+                "credential_reuse_host": "database",
+                "credential_reuse_password": "SvcPortal!123",
+            },
+        },
+        truth_graph=TruthGraph(
+            vulns=[
+                Vulnerability(id="v1", type="path_traversal", host="frontend"),
+                Vulnerability(id="v2", type="idor", host="frontend"),
+            ]
+        ),
+        flags=[
+            FlagSpec(id="f1", value="FLAG{path}", path="/var/flags/path_flag.txt", host="frontend"),
+            FlagSpec(id="f2", value="FLAG{db}", path="db:flags.secrets.flag", host="database"),
+        ],
+        golden_path=[],
+    )
+    files = render_template_payloads(snapshot)
+    assert "frontend:/srv/http/portal/index.php" in files
+    download = files["frontend:/srv/http/portal/download.php"]
+    assert 'readfile("/srv/http/config.php")' in download
+    assert "GRANT SELECT ON clinic_db.* TO 'leaked_user'@'%';" in files["db:sql"]
+
+
+@pytest.mark.asyncio
 async def test_template_builder_output_is_manifest_canonicalized(tier1_manifest):
     from open_range.builder.builder import TemplateOnlyBuilder
 

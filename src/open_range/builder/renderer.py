@@ -16,6 +16,7 @@ from typing import Any
 
 import jinja2
 
+from open_range.builder.manifest_graph import runtime_contract_from_topology
 from open_range.builder.service_manifest import generate_service_specs
 from open_range.protocols import SnapshotSpec
 
@@ -161,6 +162,7 @@ def _build_context(spec: SnapshotSpec) -> dict[str, Any]:
     hosts_raw = topology.get("hosts", [])
     zones = topology.get("zones", {})
     users = topology.get("users", [])
+    runtime_contract = runtime_contract_from_topology(topology)
 
     # Build host objects with name, zone, networks, depends_on
     hosts = _build_hosts(hosts_raw, zones)
@@ -208,8 +210,8 @@ def _build_context(spec: SnapshotSpec) -> dict[str, Any]:
         has_download,
     )
 
-    db_user = _find_db_user(users)
-    db_pass = _find_db_pass(users)
+    db_user = runtime_contract["db_user"]
+    db_pass = runtime_contract["db_password"]
 
     context: dict[str, Any] = {
         # docker-compose.yml.j2
@@ -217,26 +219,31 @@ def _build_context(spec: SnapshotSpec) -> dict[str, Any]:
         "networks": networks,
         "hosts": hosts,
         "host_names": host_names,
-        "db_host": "db",
+        "db_host": runtime_contract["db_host"],
         "db_user": db_user,
         "db_pass": db_pass,
-        "db_name": topology.get("db_name", "app_db"),
+        "db_name": runtime_contract["db_name"],
         # db_password duplicates db_pass: Dockerfile.db.j2 uses db_pass,
         # docker-compose.yml.j2 uses db_password.  Keep both for compat.
         "db_password": db_pass,
         "mysql_root_password": topology.get("mysql_root_password", _find_mysql_root_pass(users)),
-        "domain": topology.get("domain", "corp.local"),
+        "domain": runtime_contract["domain"],
         "org_name": topology.get("org_name", "Corp"),
         "ldap_admin_pass": topology.get("ldap_admin_pass", "LdapAdm1n!"),
         "smb_shares": _find_smb_shares(spec),
         "smb_user": _find_smb_user(users),
         "smb_password": _find_smb_pass(users),
+        "web_doc_root": runtime_contract["web_doc_root"],
+        "web_config_path": runtime_contract["web_config_path"],
+        "ldap_bind_dn": runtime_contract["ldap_bind_dn"],
+        "ldap_bind_pw": runtime_contract["ldap_bind_pw"],
+        "ldap_search_base_dn": runtime_contract["ldap_search_base_dn"],
         # Dockerfile.web.j2
         "users": users,
         "app_files": app_files,
         "flags": flags,
         # nginx.conf.j2
-        "server_name": topology.get("domain", "web.corp.local"),
+        "server_name": topology.get("domain", f"{runtime_contract['web_host']}.{runtime_contract['domain']}"),
         # iptables.rules.j2
         "firewall_rules": firewall_rules,
         "zone_cidrs": zone_cidrs,

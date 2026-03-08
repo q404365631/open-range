@@ -125,9 +125,9 @@ services:
     command: --default-authentication-plugin=mysql_native_password
     environment:
       - MYSQL_ROOT_PASSWORD={{ mysql_root_password | default('r00tP@ss!') }}
-      - MYSQL_DATABASE={{ db_name | default('app_db') }}
-      - MYSQL_USER={{ db_user | default('app_user') }}
-      - MYSQL_PASSWORD={{ db_password | default('AppUs3r!2024') }}
+      - MYSQL_DATABASE={{ db_name | default('referral_db') }}
+      - MYSQL_USER={{ db_user | default('svc_db') }}
+      - MYSQL_PASSWORD={{ db_password | default('SvcDb!401') }}
     volumes:
       - db_data:/var/lib/mysql
       - shared_logs:/var/log/mysql
