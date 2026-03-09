@@ -30,37 +30,11 @@ OpenRange procedurally generates full enterprise networks — web servers, datab
 | **Rewards** | Binary (solved / not solved) | Grounded in pod state: flag capture, patch validity, stealth, availability — no LLM judgment |
 | **Scale** | One challenge at a time | Continuous generation of novel Kubernetes environments via LLM Builder |
 
-## End-to-End Pipeline
-
-One manifest in, validated cyber range out:
-
-```
-YAML Manifest → LLMSnapshotBuilder (gpt-5.4, ~120s)
-                         ↓
-                    SnapshotSpec
-                    (vulns, flags, golden path, PHP app, SQL seeds, NPCs)
-                         ↓
-                    KindRenderer → Helm Chart + Kind Config
-                         ↓
-                    helm install → 4 namespaces, 7+ pods, 14+ NetworkPolicies
-                         ↓
-                    ValidatorGate → 12 checks including live exploitability
-                         ↓
-                    RangeEnvironment → Red/Blue agent episodes
-```
-
-**Validated result from `tier1_basic.yaml` (Meridian Health Partners, healthcare):**
-
-| Component | Detail |
-|-----------|--------|
-| LLM Build | 3 vulns (sqli, weak_creds, missing_authz), 2 flags, 6 golden path steps, 18 files, 8 NPCs |
-| Deploy | 7 pods across 4 namespaces in 10s, attacker tools ready in 30s |
-| Network | 14 NetworkPolicies (namespace-per-zone), 18 ExternalName DNS aliases |
-| Validation | **12/12 checks pass** including live SQLi execution from attacker pod |
-
 ## How It Works
 
-A **manifest** declares a family of legal enterprise worlds — topology, services, identities, trust relationships, vulnerability classes, and mutation bounds. The **LLMSnapshotBuilder** calls `gpt-5.4` to generate a complete `SnapshotSpec` — a multi-page PHP web application with planted vulnerabilities, database seed SQL, file share documents, NPC personas, and golden path exploit chains. The **KindRenderer** produces a Helm chart with namespace-per-zone isolation (NetworkPolicies replacing iptables), ConfigMap-injected payloads, and ExternalName services for cross-namespace DNS. The **ValidatorGate** runs 12 admission checks — 7 offline graph checks plus 5 live checks that `kubectl exec` into pods to verify the golden path is actually exploitable.
+A **manifest** declares a family of legal enterprise worlds — topology, services, identities, trust relationships, vulnerability classes, and mutation bounds. The **LLMSnapshotBuilder** calls an LLM (e.g., `gpt-5.4`) to generate a complete `SnapshotSpec` — a multi-page PHP web application with planted vulnerabilities, database seed SQL, file share documents, NPC personas, and golden path exploit chains. 
+
+The **KindRenderer** then produces a Helm chart with namespace-per-zone isolation (NetworkPolicies replacing iptables), ConfigMap-injected payloads, and ExternalName services for cross-namespace DNS. The **ValidatorGate** runs 12 admission checks — 7 offline graph checks plus 5 live checks that `kubectl exec` into the pods to verify the golden path is actually exploitable.
 
 ```mermaid
 flowchart LR
@@ -77,6 +51,15 @@ flowchart LR
 ```
 
 Red and Blue operate on the **same infrastructure simultaneously**. Red's stealth reward depends on whether Blue catches them. Blue's detection reward depends on Red's actual actions in the logs. This coupling drives co-evolution.
+
+**Example End-to-End Result (`tier1_basic.yaml`):**
+
+| Component | Detail |
+|-----------|--------|
+| LLM Build | 3 vulns (sqli, weak_creds, missing_authz), 2 flags, 6 golden path steps, 18 files, 8 NPCs |
+| Deploy | 7 pods across 4 namespaces in 10s, attacker tools ready in 30s |
+| Network | 14 NetworkPolicies (namespace-per-zone), 18 ExternalName DNS aliases |
+| Validation | **12/12 checks pass** including live SQLi execution from attacker pod |
 
 ## Quick Start
 
