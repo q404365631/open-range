@@ -1,20 +1,6 @@
----
-title: OpenRange Environment Server
-emoji: 🎯
-colorFrom: red
-colorTo: blue
-sdk: docker
-pinned: false
-app_port: 8000
-base_path: /web
-tags:
-  - openenv
-  - rl-environment
----
-
 <div align="center">
   <h1>OpenRange</h1>
-  <img src="assets/retro_gym_full_components_hero.png" alt="OpenRange: Multi-Agent Cybersecurity Training Gymnasium" width="800" />
+  <img src="assets/evolving_gym_hero.png" alt="OpenRange: Multi-Agent Cybersecurity Training Gymnasium" width="800" />
   <br />
   <br />
   <a href="https://github.com/meta-pytorch/OpenEnv"><img src="https://img.shields.io/badge/Powered_by-OpenEnv-green.svg" alt="Powered by OpenEnv"></a>
@@ -23,16 +9,33 @@ tags:
   <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0">
 </div>
 
-A multi-agent cybersecurity gymnasium on [OpenEnv](https://github.com/meta-pytorch/OpenEnv). An LLM generates complete enterprise network labs from YAML manifests, deploys them to Kubernetes via Helm, and validates them end-to-end — including executing real SQL injection through live pods. Red and Blue agents train on validated environments that mutate between episodes.
+## Context
+Reinforcement learning has produced breakthroughs in games, robotics, and code generation — each powered by a high-quality training environment (MuJoCo, SWE-bench, Atari). Cybersecurity has no equivalent. Offensive and defensive skills require multi-host enterprise networks with real services, real protocols, and realistic user traffic — none of which exist in current benchmarks.
 
----
+## Problem
+The closest alternatives — static CTF challenges — are hand-authored, single-exploit puzzles that don't scale. They lack background traffic, ignore the defensive side entirely, and present the same challenge on every reset. Agents trained on them memorize specific exploit sequences instead of learning transferable skills. You cannot do meaningful RL when the environment never changes.
+
+## Solution
+OpenRange procedurally generates full enterprise networks — web servers, databases, mail, LDAP, firewalls, SIEM — using an LLM-driven Builder, then mechanically validates every generated environment before an episode starts. The environment mutates on each reset, so no two episodes are alike. Red and Blue agents train simultaneously on the same live infrastructure with coupled reward signals: Red's stealth score depends on Blue's detection, and vice versa. This creates the adversarial pressure needed to drive real skill acquisition in both directions.
+
+## Key Capabilities
+
+|  | Static CTFs (Before) | OpenRange (After) |
+|--|---------------------|-------------------|
+| **Environment** | Hand-authored, fixed topology | Procedurally generated enterprise networks that mutate every episode |
+| **Diversity** | Same challenge on every reset | Unique vulnerability chains, injection points, and network layouts per episode |
+| **Validation** | Manual / honor system | 12-check mechanical pipeline verifies exploitability, patchability, and isolation before any episode runs |
+| **Realism** | No background traffic | NPCs run web queries, database transactions, and emails — Blue must filter signal from noise |
+| **Defense** | Not supported | Blue agent trains simultaneously, with rewards coupled to Red's actions |
+| **Rewards** | Binary (solved / not solved) | Grounded in pod state: flag capture, patch validity, stealth, availability — no LLM judgment |
+| **Scale** | One challenge at a time | Continuous generation of novel Kubernetes environments via LLM Builder |
 
 ## End-to-End Pipeline
 
 One manifest in, validated cyber range out:
 
 ```
-YAML Manifest → LLMSnapshotBuilder (gpt-5.2-codex, ~120s)
+YAML Manifest → LLMSnapshotBuilder (gpt-5.4, ~120s)
                          ↓
                     SnapshotSpec
                     (vulns, flags, golden path, PHP app, SQL seeds, NPCs)
@@ -57,11 +60,11 @@ YAML Manifest → LLMSnapshotBuilder (gpt-5.2-codex, ~120s)
 
 ## How It Works
 
-A **manifest** declares a family of legal enterprise worlds — topology, services, identities, trust relationships, vulnerability classes, and mutation bounds. The **LLMSnapshotBuilder** calls `gpt-5.2-codex` to generate a complete `SnapshotSpec` — a multi-page PHP web application with planted vulnerabilities, database seed SQL, file share documents, NPC personas, and golden path exploit chains. The **KindRenderer** produces a Helm chart with namespace-per-zone isolation (NetworkPolicies replacing iptables), ConfigMap-injected payloads, and ExternalName services for cross-namespace DNS. The **ValidatorGate** runs 12 admission checks — 7 offline graph checks plus 5 live checks that `kubectl exec` into pods to verify the golden path is actually exploitable.
+A **manifest** declares a family of legal enterprise worlds — topology, services, identities, trust relationships, vulnerability classes, and mutation bounds. The **LLMSnapshotBuilder** calls `gpt-5.4` to generate a complete `SnapshotSpec` — a multi-page PHP web application with planted vulnerabilities, database seed SQL, file share documents, NPC personas, and golden path exploit chains. The **KindRenderer** produces a Helm chart with namespace-per-zone isolation (NetworkPolicies replacing iptables), ConfigMap-injected payloads, and ExternalName services for cross-namespace DNS. The **ValidatorGate** runs 12 admission checks — 7 offline graph checks plus 5 live checks that `kubectl exec` into pods to verify the golden path is actually exploitable.
 
 ```mermaid
 flowchart LR
-    M[Manifest<br/>legal family +<br/>mutation envelope] --> B[LLMSnapshotBuilder<br/>gpt-5.2-codex]
+    M[Manifest<br/>legal family +<br/>mutation envelope] --> B[LLMSnapshotBuilder<br/>gpt-5.4]
     B --> S[SnapshotSpec<br/>vulns + flags + files + golden path]
     S --> R[KindRenderer<br/>Helm chart + Kind config]
     R --> K[Kind Cluster<br/>namespace-per-zone pods]
@@ -77,53 +80,41 @@ Red and Blue operate on the **same infrastructure simultaneously**. Red's stealt
 
 ## Quick Start
 
+### 1. Installation
+
 ```bash
-# Install
 git clone https://github.com/open-cybernauts/open-range.git
 cd open-range
-pip install -e .
+uv sync
 
-# Prerequisites for Kind deployment
-# - Docker, Kind (https://kind.sigs.k8s.io/), Helm (https://helm.sh/), kubectl
+# Optional: Enable the LiteLLM-backed builder pipeline
+uv sync --extra builder
+```
 
-# Full E2E: manifest → LLM build → Helm deploy → validate
-export OPENAI_API_KEY="sk-..."
-python -c "
-import asyncio, yaml
-from pathlib import Path
-from open_range.builder.builder import LLMSnapshotBuilder
-from open_range.builder.renderer import KindRenderer
-from open_range.protocols import BuildContext
+### 2. Run an Interactive Demo
+Test the core mechanics locally without Kubernetes or LLMs:
+```bash
+uv run python examples/demo.py
+```
 
-manifest = yaml.safe_load(Path('manifests/tier1_basic.yaml').read_text())
-builder = LLMSnapshotBuilder(model='openai/gpt-5.2-codex', max_tokens=32768)
-spec = asyncio.run(builder.build(manifest, BuildContext(seed=42, tier=1)))
-KindRenderer().render(spec, Path('/tmp/openrange'))
-print(f'Vulns: {[v.type for v in spec.truth_graph.vulns]}')
-print(f'Chart: /tmp/openrange/openrange')
-"
+### 3. Spin up an Environment (Kind / Kubernetes)
+To build, validate, and boot a full Red vs Blue sandbox locally on Kind:
+```bash
+# Prerequisites: Docker, Kind, Helm, kubectl
 
-# Deploy to Kind
-helm upgrade --install openrange /tmp/openrange/openrange
+# 1. Build a local snapshot from a manifest
+export OPENRANGE_BUILDER_MODEL="openai/gpt-5.4"
+uv run openrange build -m manifests/tier1_basic.yaml -o /tmp/snapshot --tier 1
 
-# Check pods
-kubectl get pods --all-namespaces -l app.kubernetes.io/part-of=openrange
+# 2. Render Helm chart and Validate
+uv run openrange render -s /tmp/snapshot/spec.json -o /tmp/artifacts
+uv run openrange validate -s /tmp/snapshot/spec.json 
 
-# CLI commands
-openrange build -m manifests/tier1_basic.yaml -o /tmp/snapshot --model openai/gpt-5.2-codex
-openrange render -s /tmp/snapshot/spec.json -o /tmp/artifacts
-openrange validate -s /tmp/snapshot/spec.json
-openrange deploy -s /tmp/snapshot/spec.json
-openrange episode -s /tmp/snapshot/spec.json --golden-path
+# 3. Deploy to Kind
+uv run openrange deploy -s /tmp/snapshot/spec.json
 
-# Generate synthetic SFT traces
-openrange synthetic-data \
-  --manifest manifests/tier1_basic.yaml \
-  --output data/sft_red.jsonl \
-  --roles red
-
-# Run the OpenEnv server
-openrange server
+# 4. Start the FastAPI server
+uv run openrange server  # Runs on 0.0.0.0:8000
 ```
 
 ## Kubernetes Architecture
@@ -165,26 +156,30 @@ The range deploys to Kind with **namespace-per-zone** isolation:
 
 ## Core Components
 
-**Manifest** — YAML defining the legal world family: hosts, zones, services, users, NPCs, data assets, credential policies, monitoring coverage, trust relationships, vulnerability classes, and pre-provisioned DB schema with exact column definitions.
+| Component | What it does |
+|-----------|-------------|
+| **Manifests** | Declarative YAML blueprints that define valid enterprise topologies — hosts, zones, services, users, and allowed vulnerability classes. Ships with healthcare, fintech, and SaaS examples at tiers 1–3. |
+| **Builder / Mutator** | LLM-driven agent (via [LiteLLM](https://github.com/BerriAI/litellm)) that generates a unique `SnapshotSpec` and mutates the environment on each `reset()` using curriculum feedback from prior episodes. |
+| **KindRenderer** | Produces a Helm chart (`values.yaml` from SnapshotSpec + static Go templates) and Kind cluster config. Namespace-per-zone, NetworkPolicies, ConfigMap payloads, ExternalName DNS aliases. |
+| **HelmRunner** | `helm upgrade --install` / `helm uninstall` for lifecycle. `KubePodSet` provides `exec()`, `is_healthy()`, `cp()`, `restart()` via `kubectl`. |
+| **ValidatorGate** | Mechanical admission controller running the 12-check test pipeline to ensure exploitability, graph coherence, and isolation. |
+| **Environment** | `RangeEnvironment(MCPEnvironment)` following the OpenEnv contract. `reset()` selects a frozen admitted snapshot. `step(action)` routes commands to live SIEM / attacker pods. |
+| **Rewards** | Fully grounded in container state. Red is scored on flag capture (`kubectl exec`), efficiency, and stealth. Blue is scored on detection accuracy, patch validity, and service availability. No LLM judgment involved. |
+| **NPC Traffic** | Background noise engine generating benign shell-script HTTP/DB patterns or full LLM-driven NPC agents with autonomous workday loops and stimulus-responses. |
+| **Agents** | BYO protocol — implement `reset()` and `act()`. Ships with `LLMRangeAgent` (any LiteLLM model), `ScriptedAgent` (testing), and `HumanAgent` (interactive). |
 
-**Builder / Mutator** — `LLMSnapshotBuilder` calls `gpt-5.2-codex` to generate a `SnapshotSpec`. `compile_manifest_topology` hydrates the LLM output with dependency edges and trust edges from the manifest. `_fixup_golden_path` post-processes commands to fix URL encoding and shell exit codes. The mutator derives child snapshots using typed mutation plans with curriculum-guided parent selection.
+### Example
 
-**KindRenderer** — Produces a Helm chart (`values.yaml` from SnapshotSpec + static Go templates) and Kind cluster config. Namespace-per-zone, NetworkPolicies, ConfigMap payloads, ExternalName DNS aliases.
+```python
+from open_range.agents.episode import run_episode
+from open_range.agents.llm_agent import LLMRangeAgent
+from open_range.server.environment import RangeEnvironment
 
-**HelmRunner / KubePodSet** — `helm upgrade --install` / `helm uninstall` for lifecycle. `KubePodSet` provides `exec()`, `is_healthy()`, `cp()`, `restart()` via `kubectl` (drop-in replacement for the Docker-backed `ContainerSet`).
-
-**Environment** — `RangeEnvironment(MCPEnvironment)` following the OpenEnv contract. `reset()` selects a frozen admitted snapshot. `step(action)` routes commands — Red runs on the attacker pod, Blue runs on the SIEM. MCP tool protocol with `shell_command`, `submit_flag`, `submit_finding`, `python_code`.
-
-**Rewards** — All grounded in container state, not LLM judgment:
-
-| Red | Blue |
-|-----|------|
-| Flag capture (binary, `kubectl exec`) | Detection (TP rate vs Red's log) |
-| Efficiency (`gamma^steps`) | Patch validity (re-run exploit, must fail) |
-| Stealth (inversely coupled to Blue detection) | Availability (healthcheck fraction) |
-| Anti-hallucination (-0.3 per fake flag) | False positive penalty (-0.2 per NPC flagged) |
-
-**NPC Traffic** — Background noise and social engineering surface. Level 0: shell scripts generating benign traffic. Level 1: LLM-driven NPC agents with autonomous workday loops and stimulus-response for phishing.
+env = RangeEnvironment()
+red = LLMRangeAgent(model="anthropic/claude-opus-4-6-20260301")
+blue = LLMRangeAgent(model="openai/gpt-5.4")
+result = run_episode(env, red, blue, max_steps=50)
+```
 
 ## Tier System
 

@@ -474,18 +474,17 @@ def main():
     # shape mismatch.  Guard: treat empty rope_deltas as None.
     # ------------------------------------------------------------------
     try:
-        from transformers.models.qwen3_5.modeling_qwen3_5 import (
-            Qwen3_5ForConditionalGeneration,
-        )
-        _orig_compute_3d = Qwen3_5ForConditionalGeneration.compute_3d_position_ids
+        from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5Model
+
+        _orig_compute_3d = Qwen3_5Model.compute_3d_position_ids
 
         def _patched_compute_3d(self, *args, **kwargs):
             if self.rope_deltas is not None and self.rope_deltas.numel() == 0:
                 self.rope_deltas = None
             return _orig_compute_3d(self, *args, **kwargs)
 
-        Qwen3_5ForConditionalGeneration.compute_3d_position_ids = _patched_compute_3d
-        logger.info("Patched Qwen3.5 compute_3d_position_ids (rope_deltas guard)")
+        Qwen3_5Model.compute_3d_position_ids = _patched_compute_3d
+        logger.info("Patched Qwen3_5Model.compute_3d_position_ids (rope_deltas guard)")
     except Exception as e:
         logger.warning("Could not patch Qwen3.5 rope_deltas: %s", e)
 
