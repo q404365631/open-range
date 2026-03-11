@@ -1,0 +1,232 @@
+"""Live pod execution bridge for the runtime."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import shlex
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+from open_range.cluster import BootedRelease
+from open_range.runtime_types import Action
+from open_range.snapshot import Snapshot
+from open_range.world_ir import ServiceSpec
+
+
+@dataclass(frozen=True, slots=True)
+class ActionExecution:
+    """Concrete execution result for one runtime action."""
+
+    stdout: str = ""
+    stderr: str = ""
+    ok: bool = True
+    service_health: dict[str, float] = field(default_factory=dict)
+    containment_applied: bool = False
+    recovery_applied: bool = False
+
+
+class ActionBackend(Protocol):
+    def bind(self, snapshot: Snapshot, release: BootedRelease) -> None: ...
+    def clear(self) -> None: ...
+    def execute(self, action: Action) -> ActionExecution: ...
+    def service_health(self) -> dict[str, float]: ...
+    def record_event(self, event: Any) -> None: ...
+
+
+class PodActionBackend:
+    """Execute runtime actions against live actor sandboxes and service pods."""
+
+    def __init__(self) -> None:
+        self._snapshot: Snapshot | None = None
+        self._release: BootedRelease | None = None
+        self._service_by_id: dict[str, ServiceSpec] = {}
+
+    def bind(self, snapshot: Snapshot, release: BootedRelease) -> None:
+        self._snapshot = snapshot
+        self._release = release
+        self._service_by_id = {service.id: service for service in snapshot.world.services}
+
+    def clear(self) -> None:
+        self._snapshot = None
+        self._release = None
+        self._service_by_id = {}
+
+    def record_event(self, event: Any) -> None:
+        if self._release is None or "svc-siem" not in self._service_by_id:
+            return
+        payload = json.dumps(
+            {
+                "id": getattr(event, "id", ""),
+                "event_type": getattr(event, "event_type", ""),
+                "actor": getattr(event, "actor", ""),
+                "time": getattr(event, "time", 0.0),
+                "source_entity": getattr(event, "source_entity", ""),
+                "target_entity": getattr(event, "target_entity", ""),
+                "malicious": getattr(event, "malicious", False),
+                "observability_surfaces": list(getattr(event, "observability_surfaces", ())),
+                "linked_objective_predicates": list(getattr(event, "linked_objective_predicates", ())),
+            },
+            sort_keys=True,
+        )
+        cmd = f"printf '%s\\n' {shlex.quote(payload)} >> /srv/http/siem/all.log"
+        asyncio.run(self._release.pods.exec("svc-siem", cmd, timeout=5.0))
+
+    def execute(self, action: Action) -> ActionExecution:
+        if self._release is None or self._snapshot is None:
+            return ActionExecution()
+
+        if action.kind == "sleep" or action.kind == "submit_finding":
+            return ActionExecution(service_health=self.service_health())
+        if action.kind == "control":
+            return self._execute_control(action)
+        if action.kind == "shell":
+            return self._run_in_runner(action, self._shell_command(action))
+        if action.kind == "mail":
+            return self._run_in_runner(action, self._mail_command(action))
+        if action.kind == "api":
+            return self._run_in_runner(action, self._api_command(action))
+        return ActionExecution(
+            stdout="",
+            stderr=f"unsupported live action kind: {action.kind}",
+            ok=False,
+            service_health=self.service_health(),
+        )
+
+    def service_health(self) -> dict[str, float]:
+        if self._release is None:
+            return {}
+        return {
+            service_id: 1.0 if asyncio.run(self._release.pods.is_healthy(service_id)) else 0.0
+            for service_id in sorted(self._service_by_id)
+        }
+
+    def _execute_control(self, action: Action) -> ActionExecution:
+        assert self._release is not None
+        target = _action_target(action)
+        directive = str(action.payload.get("action", "contain")).lower()
+        if target not in self._service_by_id:
+            return ActionExecution(
+                stderr=f"unknown control target: {target}",
+                ok=False,
+                service_health=self.service_health(),
+            )
+        command = "rm -f /tmp/openrange-contained" if directive in {"recover", "restore"} else "touch /tmp/openrange-contained"
+        result = asyncio.run(self._release.pods.exec(target, command, timeout=action.timeout_s))
+        return ActionExecution(
+            stdout=result.stdout.strip(),
+            stderr=result.stderr.strip(),
+            ok=result.ok,
+            service_health=self.service_health(),
+            containment_applied=result.ok and directive not in {"recover", "restore"},
+            recovery_applied=result.ok and directive in {"recover", "restore"},
+        )
+
+    def _run_in_runner(self, action: Action, command: str) -> ActionExecution:
+        assert self._release is not None
+        if not command:
+            return ActionExecution(
+                stderr="no command provided",
+                ok=False,
+                service_health=self.service_health(),
+            )
+        target = _action_target(action)
+        if target and target in self._service_by_id and self._is_contained(target):
+            return ActionExecution(
+                stderr=f"target {target} is contained",
+                ok=False,
+                service_health=self.service_health(),
+            )
+        runner = self._runner_for(action)
+        result = asyncio.run(self._release.pods.exec(runner, command, timeout=action.timeout_s))
+        return ActionExecution(
+            stdout=result.stdout.strip(),
+            stderr=result.stderr.strip(),
+            ok=result.ok,
+            service_health=self.service_health(),
+        )
+
+    def _runner_for(self, action: Action) -> str:
+        if action.role == "red":
+            origin = action.payload.get("origin")
+            if isinstance(origin, str) and origin:
+                if origin in self._service_by_id or origin.startswith("sandbox-"):
+                    return origin
+            return "sandbox-red"
+        if action.role == "blue":
+            return "sandbox-blue"
+        if action.role == "green":
+            return _green_sandbox_name(action.actor_id)
+        raise ValueError(f"unsupported runner role: {action.role}")
+
+    def _api_command(self, action: Action) -> str:
+        target = _action_target(action)
+        service = self._service_by_id.get(target)
+        if service is None:
+            return f"echo unknown target {target}; exit 1"
+        port = service.ports[0] if service.ports else 80
+        if service.kind == "web_app":
+            return f"wget -qO- http://{target}:{port}/ | head -c 2048"
+        if service.kind == "db":
+            return f"nc -z -w 3 {target} {port}"
+        return f"nc -z -w 3 {target} {port}"
+
+    def _shell_command(self, action: Action) -> str:
+        command = str(action.payload.get("command", "")).strip()
+        if command:
+            return command
+        target = _action_target(action)
+        if action.role == "blue" and target == "svc-siem":
+            return "wget -qO- http://svc-siem:9200/all.log | tail -n 20"
+        if target in self._service_by_id:
+            service = self._service_by_id[target]
+            port = service.ports[0] if service.ports else 80
+            if service.kind == "web_app":
+                return f"wget -qO- http://{target}:{port}/ | head -c 512"
+            if service.kind == "siem":
+                return "wget -qO- http://svc-siem:9200/all.log | tail -n 20"
+            return f"nc -z -w 3 {target} {port}"
+        return "true"
+
+    def _mail_command(self, action: Action) -> str:
+        target = _action_target(action) or "svc-email"
+        service = self._service_by_id.get(target)
+        if service is None:
+            return f"echo unknown mail target {target}; exit 1"
+        port = service.ports[0] if service.ports else 25
+        sender = action.payload.get("from", action.actor_id)
+        recipient = action.payload.get("to", "noreply@corp.local")
+        subject = action.payload.get("subject", "routine update")
+        return (
+            "printf 'HELO corp.local\\nMAIL FROM:<{sender}>\\nRCPT TO:<{recipient}>\\nDATA\\n"
+            "Subject: {subject}\\n\\nOpenRange test mail.\\n.\\nQUIT\\n' | "
+            "nc -w 3 {target} {port}"
+        ).format(
+            sender=sender,
+            recipient=recipient,
+            subject=subject,
+            target=target,
+            port=port,
+        )
+
+    def _is_contained(self, target: str) -> bool:
+        assert self._release is not None
+        result = asyncio.run(
+            self._release.pods.exec(target, "test ! -f /tmp/openrange-contained", timeout=5.0)
+        )
+        return not result.ok
+
+
+def _action_target(action: Action) -> str:
+    target = action.payload.get("target")
+    if isinstance(target, str) and target:
+        return target
+    service = action.payload.get("service")
+    if isinstance(service, str) and service:
+        return service
+    return ""
+
+
+def _green_sandbox_name(persona_id: str) -> str:
+    safe = "".join(ch.lower() if ch.isalnum() else "-" for ch in persona_id).strip("-")
+    return f"sandbox-green-{safe}"

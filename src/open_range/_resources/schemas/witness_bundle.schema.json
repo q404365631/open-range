@@ -1,0 +1,172 @@
+{
+  "$defs": {
+    "ProbeSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "default": "",
+          "title": "Command",
+          "type": "string"
+        },
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "expected": {
+          "additionalProperties": true,
+          "title": "Expected",
+          "type": "object"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "smoke",
+            "shortcut",
+            "determinism",
+            "necessity"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "description"
+      ],
+      "title": "ProbeSpec",
+      "type": "object"
+    },
+    "WitnessAction": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "enum": [
+            "red",
+            "blue"
+          ],
+          "title": "Actor",
+          "type": "string"
+        },
+        "kind": {
+          "minLength": 1,
+          "title": "Kind",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "title": "Payload",
+          "type": "object"
+        },
+        "target": {
+          "default": "",
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "actor",
+        "kind"
+      ],
+      "title": "WitnessAction",
+      "type": "object"
+    },
+    "WitnessTrace": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_events": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Expected Events",
+          "type": "array"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "objective_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Objective Ids",
+          "type": "array"
+        },
+        "role": {
+          "enum": [
+            "red",
+            "blue"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/WitnessAction"
+          },
+          "title": "Steps",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "role"
+      ],
+      "title": "WitnessTrace",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "blue_witnesses": {
+      "items": {
+        "$ref": "#/$defs/WitnessTrace"
+      },
+      "title": "Blue Witnesses",
+      "type": "array"
+    },
+    "determinism_probes": {
+      "items": {
+        "$ref": "#/$defs/ProbeSpec"
+      },
+      "title": "Determinism Probes",
+      "type": "array"
+    },
+    "necessity_probes": {
+      "items": {
+        "$ref": "#/$defs/ProbeSpec"
+      },
+      "title": "Necessity Probes",
+      "type": "array"
+    },
+    "red_witnesses": {
+      "items": {
+        "$ref": "#/$defs/WitnessTrace"
+      },
+      "title": "Red Witnesses",
+      "type": "array"
+    },
+    "shortcut_probes": {
+      "items": {
+        "$ref": "#/$defs/ProbeSpec"
+      },
+      "title": "Shortcut Probes",
+      "type": "array"
+    },
+    "smoke_tests": {
+      "items": {
+        "$ref": "#/$defs/ProbeSpec"
+      },
+      "title": "Smoke Tests",
+      "type": "array"
+    }
+  },
+  "title": "WitnessBundle",
+  "type": "object"
+}
