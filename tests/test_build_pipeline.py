@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from open_range.pipeline import BuildPipeline
+from tests.support import OFFLINE_BUILD_CONFIG
 
 
 def _manifest_payload() -> dict:
@@ -73,7 +74,7 @@ def _manifest_payload() -> dict:
 
 def test_pipeline_builds_and_admits_snapshot(tmp_path: Path):
     pipeline = BuildPipeline()
-    candidate = pipeline.build(_manifest_payload(), tmp_path / "rendered")
+    candidate = pipeline.build(_manifest_payload(), tmp_path / "rendered", OFFLINE_BUILD_CONFIG)
     snapshot = pipeline.admit(candidate)
 
     assert candidate.world.weaknesses

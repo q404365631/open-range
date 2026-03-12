@@ -11,6 +11,7 @@ from typing import Any
 import click
 import yaml
 
+from open_range.build_config import BuildConfig
 from open_range.episode_config import EpisodeConfig
 from open_range.pipeline import BuildPipeline
 from open_range.service import OpenRange
@@ -78,10 +79,20 @@ def build_cmd(manifest: str, output: str) -> None:
 @click.option("-o", "--output", required=True, type=click.Path(), help="Render directory for candidate artifacts.")
 @click.option("--store-dir", default="snapshots", type=click.Path(), help="Snapshot store directory.")
 @click.option("--split", default="train", type=click.Choice(["train", "eval"]), help="Pool split for the admitted snapshot.")
-def admit_cmd(manifest: str, output: str, store_dir: str, split: str) -> None:
+@click.option(
+    "--validation-profile",
+    default="full",
+    type=click.Choice(["full", "no_necessity", "graph_plus_live", "graph_only"]),
+    help="Admission strictness. Use graph_only for explicit offline admission.",
+)
+def admit_cmd(manifest: str, output: str, store_dir: str, split: str, validation_profile: str) -> None:
     """Build and admit a snapshot into the snapshot store."""
     pipeline = BuildPipeline(store=FileSnapshotStore(store_dir))
-    candidate = pipeline.build(_load_manifest(manifest), Path(output))
+    candidate = pipeline.build(
+        _load_manifest(manifest),
+        Path(output),
+        BuildConfig(validation_profile=validation_profile),
+    )
     snapshot = pipeline.admit(candidate, split=split)
     snapshot_path = Path(store_dir) / snapshot.snapshot_id / "snapshot.json"
 

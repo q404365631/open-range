@@ -251,11 +251,17 @@ def evaluate_objective_grader_live(
     linked_events = [event for event in events if predicate in _event_linked_predicates(event)]
     combined_output = "\n".join(output for output in outputs if output)
     if grader.grader_kind == "event_present":
-        return any(
+        matched = any(
             _event_type(event) == grader.event_type
             and (not grader.target_id or _event_target(event) == grader.target_id)
             for event in linked_events
         )
+        if not matched:
+            return False
+        if grader.objective_tag in {"unauthorized_admin_login", "privilege_escalation"}:
+            realizations = _relevant_realizations(snapshot, grader)
+            return _probe_realizations(pods, realizations, expected_ref=grader.expected_ref) if realizations else True
+        return True
     if grader.grader_kind == "service_health":
         health = service_health.get(grader.service_id or grader.target_id, 1.0)
         return health < 0.9 or any(_event_type(event) == "ServiceDegraded" for event in linked_events)
@@ -290,7 +296,10 @@ def evaluate_objective_grader_live(
         result = asyncio.run(pods.exec(grader.service_id or "svc-db", query, timeout=10.0))
         return result.ok and result.stdout.strip() not in {"", "0"}
     if grader.grader_kind == "outbound_request":
-        return bool(linked_events) and bool(combined_output.strip())
+        if not linked_events or not combined_output.strip():
+            return False
+        realizations = _relevant_realizations(snapshot, grader)
+        return _probe_realizations(pods, realizations, expected_ref=grader.expected_ref) if realizations else True
     return False
 
 
@@ -329,6 +338,41 @@ def _snapshot_mapping(snapshot: object, attr: str) -> dict[str, object]:
     if isinstance(value, dict):
         return value
     return {}
+
+
+def _relevant_realizations(snapshot: object, grader: ObjectiveGraderSpec) -> tuple[tuple[str, str], ...]:
+    world = getattr(snapshot, "world", None)
+    weaknesses = getattr(world, "weaknesses", ()) if world is not None else ()
+    matches: list[tuple[str, str]] = []
+    for weakness in weaknesses:
+        if grader.objective_tag not in getattr(weakness, "objective_tags", ()):
+            continue
+        weakness_target = str(getattr(weakness, "target", ""))
+        weakness_ref = str(getattr(weakness, "target_ref", ""))
+        if grader.service_id and weakness_target not in {grader.service_id, grader.target_id}:
+            if grader.target_id and weakness_ref != grader.target_id:
+                continue
+            if not grader.target_id:
+                continue
+        for realization in getattr(weakness, "realization", ()):
+            service = str(getattr(realization, "service", ""))
+            path = str(getattr(realization, "path", ""))
+            if service and path:
+                matches.append((service, path))
+    return tuple(dict.fromkeys(matches))
+
+
+def _probe_realizations(pods: object, realizations: tuple[tuple[str, str], ...], *, expected_ref: str) -> bool:
+    if not realizations:
+        return False
+    for service, path in realizations:
+        command = f"test -f {shlex.quote(path)}"
+        if expected_ref:
+            command += f" && grep -q {shlex.quote(expected_ref)} {shlex.quote(path)}"
+        result = asyncio.run(pods.exec(service, command, timeout=10.0))
+        if result.ok:
+            return True
+    return False
 
 
 def _event_type(event: object) -> str:

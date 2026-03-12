@@ -234,20 +234,6 @@ def build_decision_prompt(
     visible = _visible_event_lines(observation.visible_events)
     candidates = "\n".join(f"- [{candidate.label}] {candidate.text}" for candidate in candidate_actions)
     lines = [
-        f"trace_source={trace_source}\n"
-        f"teacher_source={teacher_source}\n"
-        f"split={split}\n"
-        f"snapshot_id={snapshot_id}\n"
-        f"world_id={world_id}\n"
-        f"world_hash={world_hash}\n"
-        f"lineage_root_world_id={lineage.root_world_id}\n"
-        f"lineage_generation={lineage.generation}\n"
-        f"lineage_mutation_ops={','.join(lineage.mutation_ops) or 'none'}\n"
-        f"mode={mode}\n"
-        f"start_state={start_state}\n"
-        f"prompt_mode={prompt_mode}\n"
-        f"role={role}\n"
-        f"decision_index={decision_index}\n"
         f"sim_time={observation.sim_time:.2f}\n"
         f"last_stdout={observation.stdout or 'none'}\n"
         f"alerts_delta={len(observation.alerts_delta)}\n"
@@ -257,6 +243,23 @@ def build_decision_prompt(
         f"{candidates}"
     ]
     if include_hidden_context:
+        lines.insert(
+            0,
+            f"trace_source={trace_source}\n"
+            f"teacher_source={teacher_source}\n"
+            f"split={split}\n"
+            f"snapshot_id={snapshot_id}\n"
+            f"world_id={world_id}\n"
+            f"world_hash={world_hash}\n"
+            f"lineage_root_world_id={lineage.root_world_id}\n"
+            f"lineage_generation={lineage.generation}\n"
+            f"lineage_mutation_ops={','.join(lineage.mutation_ops) or 'none'}\n"
+            f"mode={mode}\n"
+            f"start_state={start_state}\n"
+            f"prompt_mode={prompt_mode}\n"
+            f"role={role}\n"
+            f"decision_index={decision_index}\n",
+        )
         weaknesses_text = "\n".join(
             f"- {weak.family}:{weak.kind}@{weak.target} tags={','.join(weak.benchmark_tags) or 'none'} objectives={','.join(weak.objective_tags) or 'none'}"
             for weak in weaknesses

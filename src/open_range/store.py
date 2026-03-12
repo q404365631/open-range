@@ -1,4 +1,4 @@
-"""Immutable snapshot persistence."""
+"""Immutable snapshot persistence with explicit runtime hydration."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from random import Random
 from typing import Literal, Protocol
 
 from open_range.admission import ValidatorReport, ReferenceBundle
-from open_range.snapshot import KindArtifacts, Snapshot, world_hash
+from open_range.snapshot import KindArtifacts, RuntimeSnapshot, Snapshot, world_hash
 from open_range.synth import SynthArtifacts
 from open_range.world_ir import WorldIR
 
@@ -29,6 +29,7 @@ class SnapshotStore(Protocol):
         split: PoolSplit = "train",
     ) -> Snapshot: ...
     def load(self, snapshot_id: str) -> Snapshot: ...
+    def load_runtime(self, snapshot_id: str) -> RuntimeSnapshot: ...
     def list(self, *, split: PoolSplit | None = None) -> tuple[Snapshot, ...]: ...
     def sample(
         self,
@@ -37,6 +38,13 @@ class SnapshotStore(Protocol):
         seed: int | None = None,
         strategy: Literal["random", "latest"] = "random",
     ) -> Snapshot: ...
+    def sample_runtime(
+        self,
+        *,
+        split: PoolSplit = "train",
+        seed: int | None = None,
+        strategy: Literal["random", "latest"] = "random",
+    ) -> RuntimeSnapshot: ...
 
 
 class FileSnapshotStore:
@@ -99,7 +107,6 @@ class FileSnapshotStore:
             file_assets=file_assets,
             identity_seed=identity_seed,
             validator_report=vr,
-            reference_bundle=wb,
             world_hash=world_hash(world),
             parent_snapshot_id=None,
             parent_world_id=world.lineage.parent_world_id,
@@ -128,6 +135,19 @@ class FileSnapshotStore:
         if not path.exists():
             raise FileNotFoundError(snapshot_id)
         return Snapshot.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def hydrate(self, snapshot: Snapshot) -> RuntimeSnapshot:
+        reference_path = Path(snapshot.reference_bundle_path)
+        reference_bundle = ReferenceBundle.model_validate_json(reference_path.read_text(encoding="utf-8"))
+        return RuntimeSnapshot.model_validate(
+            {
+                **snapshot.model_dump(mode="json"),
+                "reference_bundle": reference_bundle.model_dump(mode="json"),
+            }
+        )
+
+    def load_runtime(self, snapshot_id: str) -> RuntimeSnapshot:
+        return self.hydrate(self.load(snapshot_id))
 
     def list(self, *, split: PoolSplit | None = None) -> tuple[Snapshot, ...]:
         snapshots: list[Snapshot] = []
@@ -161,6 +181,15 @@ class FileSnapshotStore:
             raise ValueError("strategy must be 'random' or 'latest'")
         rng = Random(seed)
         return snapshots[rng.randrange(len(snapshots))]
+
+    def sample_runtime(
+        self,
+        *,
+        split: PoolSplit = "train",
+        seed: int | None = None,
+        strategy: Literal["random", "latest"] = "random",
+    ) -> RuntimeSnapshot:
+        return self.hydrate(self.sample(split=split, seed=seed, strategy=strategy))
 
     def _metadata_for(self, snapshot_id: str) -> dict[str, object]:
         metadata_path = self.store_dir / snapshot_id / "metadata.json"

@@ -37,7 +37,8 @@ def test_decision_prompt_and_completion_are_structured() -> None:
 
     assert "candidate_actions:" in prompt
     assert "[teacher]" in prompt
-    assert "prompt_mode=zero_day" in prompt
+    assert "prompt_mode=" not in prompt
+    assert "snapshot_id=" not in prompt
     assert "benchmark_tags=" not in prompt
     assert "weaknesses:" not in prompt
     assert "<choice>teacher</choice>" in completion

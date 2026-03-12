@@ -7,6 +7,7 @@ from open_range.compiler import EnterpriseSaaSManifestCompiler
 from open_range.render import EnterpriseSaaSKindRenderer
 from open_range.synth import EnterpriseSaaSWorldSynthesizer
 from open_range.weaknesses import CatalogWeaknessSeeder
+from tests.support import OFFLINE_BUILD_CONFIG
 
 
 def _manifest_payload() -> dict:
@@ -139,7 +140,7 @@ def test_synthesizer_realizes_exact_code_web_templates_and_witness_routes(tmp_pa
         web_payloads = synth.service_payloads["svc-web"]
         assert any(file.mount_path == route and file.content.startswith("<?php") for file in web_payloads)
         artifacts = EnterpriseSaaSKindRenderer().render(world, synth, tmp_path / f"{kind}-render")
-        reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
+        reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts, OFFLINE_BUILD_CONFIG)
         assert report.admitted is True
         first_step = reference_bundle.reference_attack_traces[0].steps[0]
         assert first_step.payload["path"] == route.removeprefix("/var/www/html")

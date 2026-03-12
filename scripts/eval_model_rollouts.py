@@ -18,11 +18,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from open_range import BuildPipeline, EpisodeConfig, FileSnapshotStore, FrontierMutationPolicy, PopulationStats, load_bundled_manifest
+from open_range import BuildConfig, BuildPipeline, EpisodeConfig, FileSnapshotStore, FrontierMutationPolicy, PopulationStats, load_bundled_manifest
 from open_range.probe_planner import runtime_action
 from open_range.runtime import ReferenceDrivenRuntime
 from open_range.runtime_types import Action, Observation
-from open_range.snapshot import Snapshot
+from open_range.snapshot import RuntimeSnapshot
 from open_range.training_data import (
     TraceCandidate,
     TraceLineage,
@@ -37,6 +37,7 @@ from open_range.training_data import (
 
 DEFAULT_BASE_MODEL = "HuggingFaceTB/SmolLM2-360M-Instruct"
 DEFAULT_ADAPTER = "/tmp/openrange-sft-tiny-split/adapter"
+OFFLINE_BUILD_CONFIG = BuildConfig(validation_profile="graph_only")
 
 
 def _default_manifest_name() -> str:
@@ -63,7 +64,7 @@ def teacher_pick_rate(picks: list[dict[str, Any]]) -> float:
     return sum(1 for pick in picks if pick.get("chosen_label") == "teacher") / len(picks)
 
 
-def build_prompt(snapshot: Snapshot, observation: Observation, candidates: tuple[TraceCandidate, ...], decision_index: int) -> str:
+def build_prompt(snapshot: RuntimeSnapshot, observation: Observation, candidates: tuple[TraceCandidate, ...], decision_index: int) -> str:
     return (
         "<system>\n"
         "You are the red operator in OpenRange. "
@@ -97,7 +98,7 @@ def build_prompt(snapshot: Snapshot, observation: Observation, candidates: tuple
     )
 
 
-def red_candidates(runtime: ReferenceDrivenRuntime, snapshot: Snapshot) -> tuple[TraceCandidate, ...]:
+def red_candidates(runtime: ReferenceDrivenRuntime, snapshot: RuntimeSnapshot) -> tuple[TraceCandidate, ...]:
     expected = runtime._next_red_step()  # bounded eval probe: candidate set includes the exact next reference action
     if expected is None:
         sleep = Action(actor_id="red", role="red", kind="sleep", payload={})
@@ -209,8 +210,13 @@ def evaluate_model_rollouts(
         store = FileSnapshotStore(root / "snapshots")
         pipeline = BuildPipeline(store=store)
 
-        snapshots: list[Snapshot] = []
-        current = pipeline.admit(pipeline.build(payload, root / "rendered-base"), split="train")
+        snapshots: list[RuntimeSnapshot] = []
+        current = store.hydrate(
+            pipeline.admit(
+                pipeline.build(payload, root / "rendered-base", OFFLINE_BUILD_CONFIG),
+                split="train",
+            )
+        )
         snapshots.append(current)
         for idx in range(1, mutations + 1):
             parent_stats = PopulationStats(
@@ -226,64 +232,84 @@ def evaluate_model_rollouts(
                 blue_signal_points=current.validator_report.blue_signal_points,
             )
             child_world = mutation_policy.mutate(current.world, parent_stats=parent_stats)
-            current = pipeline.admit_child(child_world, root / f"rendered-child-{idx}", split="eval")
+            current = store.hydrate(
+                pipeline.admit_child(
+                    child_world,
+                    root / f"rendered-child-{idx}",
+                    split="eval",
+                    build_config=OFFLINE_BUILD_CONFIG,
+                )
+            )
             snapshots.append(current)
 
         reports: list[dict[str, Any]] = []
         exact_picks = 0
         total_picks = 0
         red_wins = 0
+        total_pairs = 0
 
         for snapshot in snapshots:
-            runtime = ReferenceDrivenRuntime()
-            runtime.reset(
-                snapshot,
-                EpisodeConfig(mode="red_only", scheduler_mode="strict_turns", opponent_blue="scripted"),
-            )
-            picks: list[dict[str, Any]] = []
-            turns = 0
-            while not runtime.state().done and turns < max_turns:
-                try:
-                    decision = runtime.next_decision()
-                except RuntimeError:
-                    if runtime.state().done:
-                        break
-                    raise
-                candidates = red_candidates(runtime, snapshot)
-                prompt = build_prompt(snapshot, decision.obs, candidates, turns)
-                ranked = score_candidates(model, tokenizer, prompt, candidates)
-                chosen, loss = ranked[0]
-                runtime.act("red", chosen.action)
-                turns += 1
-                total_picks += 1
-                if chosen.label == "teacher":
-                    exact_picks += 1
-                picks.append(
+            pair_reports: list[dict[str, Any]] = []
+            for attack_trace_index in range(max(1, len(snapshot.reference_bundle.reference_attack_traces))):
+                total_pairs += 1
+                runtime = ReferenceDrivenRuntime()
+                runtime.reset(
+                    snapshot,
+                    EpisodeConfig(mode="red_only", scheduler_mode="strict_turns", opponent_blue="scripted"),
+                    reference_attack_index=attack_trace_index,
+                )
+                picks: list[dict[str, Any]] = []
+                turns = 0
+                while not runtime.state().done and turns < max_turns:
+                    try:
+                        decision = runtime.next_decision()
+                    except RuntimeError:
+                        if runtime.state().done:
+                            break
+                        raise
+                    candidates = red_candidates(runtime, snapshot)
+                    prompt = build_prompt(snapshot, decision.obs, candidates, turns)
+                    ranked = score_candidates(model, tokenizer, prompt, candidates)
+                    chosen, loss = ranked[0]
+                    runtime.act("red", chosen.action)
+                    turns += 1
+                    total_picks += 1
+                    if chosen.label == "teacher":
+                        exact_picks += 1
+                    picks.append(
+                        {
+                            "chosen_label": chosen.label,
+                            "chosen_text": chosen.text,
+                            "chosen_loss": loss,
+                            "candidates": [{"label": cand.label, "loss": cand_loss} for cand, cand_loss in ranked],
+                        }
+                    )
+
+                score = runtime.score()
+                if score.winner == "red":
+                    red_wins += 1
+                truncated = not runtime.state().done
+                pair_reports.append(
                     {
-                        "chosen_label": chosen.label,
-                        "chosen_text": chosen.text,
-                        "chosen_loss": loss,
-                        "candidates": [{"label": cand.label, "loss": cand_loss} for cand, cand_loss in ranked],
+                        "attack_trace_index": attack_trace_index,
+                        "done": score.done,
+                        "truncated": truncated,
+                        "winner": score.winner,
+                        "terminal_reason": score.terminal_reason or ("max_turns_reached" if truncated else ""),
+                        "red_reward": score.red_reward,
+                        "blue_reward": score.blue_reward,
+                        "turns": turns,
+                        "exact_pick_rate": teacher_pick_rate(picks),
+                        "picks": picks,
                     }
                 )
-
-            score = runtime.score()
-            if score.winner == "red":
-                red_wins += 1
-            truncated = not runtime.state().done
             reports.append(
                 {
                     "snapshot_id": snapshot.snapshot_id,
                     "world_id": snapshot.world.world_id,
-                    "done": score.done,
-                    "truncated": truncated,
-                    "winner": score.winner,
-                    "terminal_reason": score.terminal_reason or ("max_turns_reached" if truncated else ""),
-                    "red_reward": score.red_reward,
-                    "blue_reward": score.blue_reward,
-                    "turns": turns,
-                    "exact_pick_rate": teacher_pick_rate(picks),
-                    "picks": picks,
+                    "red_win_rate": sum(1 for report in pair_reports if report["winner"] == "red") / len(pair_reports) if pair_reports else 0.0,
+                    "exact_pick_rate": sum(report["exact_pick_rate"] for report in pair_reports) / len(pair_reports) if pair_reports else 0.0,
+                    "pairs": pair_reports,
                     "weaknesses": [f"{weak.family}:{weak.kind}@{weak.target}" for weak in snapshot.world.weaknesses],
                 }
             )
@@ -293,7 +319,7 @@ def evaluate_model_rollouts(
             "adapter": str(adapter),
             "base_model": base_model,
             "snapshot_count": len(reports),
-            "red_win_rate": red_wins / len(reports) if reports else 0.0,
+            "red_win_rate": red_wins / total_pairs if total_pairs else 0.0,
             "exact_pick_rate": exact_picks / total_picks if total_picks else 0.0,
             "reports": reports,
         }

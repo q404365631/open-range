@@ -7,14 +7,14 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from open_range.build_config import BuildConfig, DEFAULT_BUILD_CONFIG
+from open_range.build_config import BuildConfig
 from open_range.curriculum import FrontierMutationPolicy, PopulationStats
 from open_range.episode_config import EpisodeConfig
 from open_range.pipeline import BuildPipeline
 from open_range.probe_planner import runtime_action
 from open_range.runtime import ReferenceDrivenRuntime
 from open_range.runtime_types import Action, Observation
-from open_range.snapshot import Snapshot
+from open_range.snapshot import RuntimeSnapshot, Snapshot
 from open_range.store import FileSnapshotStore
 from open_range.training_data import (
     TraceCandidate,
@@ -31,6 +31,7 @@ from open_range.training_data import (
 
 DEFAULT_RUNTIME_MODES = ("red_only", "blue_only_live", "blue_only_from_prefix")
 MAX_MUTATION_ATTEMPTS = 4
+DEFAULT_TRACE_BUILD_CONFIG = BuildConfig(validation_profile="graph_only")
 
 
 class TraceDatasetGenerator:
@@ -39,7 +40,7 @@ class TraceDatasetGenerator:
     def __init__(
         self,
         *,
-        build_config: BuildConfig = DEFAULT_BUILD_CONFIG,
+        build_config: BuildConfig = DEFAULT_TRACE_BUILD_CONFIG,
         mutation_policy: FrontierMutationPolicy | None = None,
         pipeline: BuildPipeline | None = None,
     ) -> None:
@@ -75,17 +76,18 @@ class TraceDatasetGenerator:
             lineage_dir = root_dir / f"root-{root_idx:02d}"
             lineage_dir.mkdir(parents=True, exist_ok=True)
             store_split = "train" if root_idx == 0 else "eval"
-            base = pipeline.admit(
+            base_public = pipeline.admit(
                 pipeline.build(payload, lineage_dir / "rendered-base", self.build_config),
                 split=store_split,
             )
+            base = store.hydrate(base_public)
             lineage_root = base.world.world_id
             lineage_roots.append(lineage_root)
             dataset_split = _dataset_split(root_idx, roots)
             snapshots = [base]
             current = base
             for mutation_idx in range(1, mutations_per_root + 1):
-                admitted_child: Snapshot | None = None
+                admitted_child: RuntimeSnapshot | None = None
                 for attempt_idx in range(1, MAX_MUTATION_ATTEMPTS + 1):
                     child_world = self.mutation_policy.mutate(
                         current.world,
@@ -97,12 +99,13 @@ class TraceDatasetGenerator:
                         ),
                     )
                     try:
-                        admitted_child = pipeline.admit_child(
+                        child_public = pipeline.admit_child(
                             child_world,
                             lineage_dir / f"rendered-child-{mutation_idx}-attempt-{attempt_idx}",
                             split=store_split,
                             build_config=self.build_config,
                         )
+                        admitted_child = store.hydrate(child_public)
                     except ValueError:
                         continue
                     break
@@ -204,7 +207,7 @@ class TraceDatasetGenerator:
 
     def _episode_rows(
         self,
-        snapshot: Snapshot,
+        snapshot: RuntimeSnapshot,
         episode_config: EpisodeConfig,
         *,
         trace_source: str,
@@ -315,7 +318,7 @@ def generate_trace_dataset(
     outdir: str | Path,
     *,
     manifest_source: str = "inline",
-    build_config: BuildConfig = DEFAULT_BUILD_CONFIG,
+    build_config: BuildConfig = DEFAULT_TRACE_BUILD_CONFIG,
     roots: int = 1,
     mutations_per_root: int = 3,
     include_sim: bool = True,
@@ -338,7 +341,7 @@ def _expected_step(steps, index: int):
     return steps[index]
 
 
-def _teacher_action(snapshot: Snapshot, actor: str, expected) -> Action:
+def _teacher_action(snapshot: RuntimeSnapshot, actor: str, expected) -> Action:
     if expected is None:
         return Action(actor_id=actor, role=actor, kind="sleep", payload={})
     action = runtime_action(actor, expected)
@@ -346,7 +349,7 @@ def _teacher_action(snapshot: Snapshot, actor: str, expected) -> Action:
 
 
 def _candidate_actions(
-    snapshot: Snapshot,
+    snapshot: RuntimeSnapshot,
     *,
     actor: str,
     observation: Observation,
@@ -424,7 +427,7 @@ def _red_alternatives(expected_action: Action) -> list[TraceCandidate]:
 
 
 def _blue_alternatives(
-    snapshot: Snapshot,
+    snapshot: RuntimeSnapshot,
     observation: Observation,
     expected_action: Action,
     remaining_targets: set[str],
@@ -572,7 +575,7 @@ def _scripted_choice(
     return by_label.get("teacher", candidates[0]).action
 
 
-def _service_not_in(snapshot: Snapshot, *, excluded: set[str]) -> str:
+def _service_not_in(snapshot: RuntimeSnapshot, *, excluded: set[str]) -> str:
     for preferred in ("svc-email", "svc-web", "svc-idp", "svc-fileshare", "svc-db", "svc-siem"):
         if preferred not in excluded and any(service.id == preferred for service in snapshot.world.services):
             return preferred
@@ -582,7 +585,7 @@ def _service_not_in(snapshot: Snapshot, *, excluded: set[str]) -> str:
     return ""
 
 
-def _reference_trace_pairs(snapshot: Snapshot, mode: str) -> tuple[tuple[int, int], ...]:
+def _reference_trace_pairs(snapshot: RuntimeSnapshot, mode: str) -> tuple[tuple[int, int], ...]:
     attack_count = max(1, len(snapshot.reference_bundle.reference_attack_traces))
     defense_count = max(1, len(snapshot.reference_bundle.reference_defense_traces))
     if mode == "red_only":

@@ -8,7 +8,7 @@ from typing import Protocol
 from open_range.episode_config import DEFAULT_EPISODE_CONFIG, EpisodeConfig
 from open_range.runtime import ReferenceDrivenRuntime
 from open_range.runtime_types import Action, Observation
-from open_range.snapshot import Snapshot
+from open_range.snapshot import RuntimeSnapshot
 
 
 class SessionAgent(Protocol):
@@ -43,7 +43,7 @@ class TandemEpisodeDriver:
 
     def run_episode(
         self,
-        snapshot: Snapshot,
+        snapshot: RuntimeSnapshot,
         *,
         red_agent: SessionAgent,
         blue_agent: SessionAgent,

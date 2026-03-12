@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from open_range import (
     Action,
+    BuildConfig,
     BuildPipeline,
     EpisodeConfig,
     ExecResult,
@@ -15,6 +16,7 @@ from open_range import (
     TandemEpisodeDriver,
 )
 from open_range.code_web import code_web_payload
+from tests.support import OFFLINE_BUILD_CONFIG
 
 
 def _manifest_payload() -> dict:
@@ -98,8 +100,8 @@ def test_end_to_end_pipeline_store_reset_and_tandem_episode(tmp_path: Path):
     store = FileSnapshotStore(tmp_path / "snapshots")
     pipeline = BuildPipeline(store=store)
 
-    candidate = pipeline.build(_manifest_payload(), tmp_path / "rendered")
-    snapshot = pipeline.admit(candidate, split="train")
+    candidate = pipeline.build(_manifest_payload(), tmp_path / "rendered", OFFLINE_BUILD_CONFIG)
+    snapshot = store.hydrate(pipeline.admit(candidate, split="train"))
 
     runtime_service = OpenRange(store=store)
     runtime_service.reset(snapshot.snapshot_id, EpisodeConfig(mode="joint_pool", green_enabled=True))
@@ -240,9 +242,9 @@ def test_live_backend_integration_carries_logs_from_runtime_events(tmp_path: Pat
     backend = FakeBackend()
     admission = LocalAdmissionController(mode="fail_fast", live_backend=backend)
     pipeline = BuildPipeline(store=store, admission=admission)
-    candidate = pipeline.build(_manifest_payload(), tmp_path / "rendered")
+    candidate = pipeline.build(_manifest_payload(), tmp_path / "rendered", BuildConfig(validation_profile="full"))
     built_world = candidate.world
-    snapshot = pipeline.admit(candidate, split="train")
+    snapshot = store.hydrate(pipeline.admit(candidate, split="train"))
 
     service = OpenRange(store=store, live_backend=backend)
     service.reset(snapshot.snapshot_id, EpisodeConfig(mode="joint_pool", green_enabled=False))
@@ -266,7 +268,12 @@ def test_live_backend_integration_carries_logs_from_runtime_events(tmp_path: Pat
 def test_green_reactive_branches_flow_through_runtime_between_external_decisions(tmp_path: Path):
     store = FileSnapshotStore(tmp_path / "snapshots")
     pipeline = BuildPipeline(store=store)
-    snapshot = pipeline.admit(pipeline.build(_manifest_payload(), tmp_path / "rendered"), split="train")
+    snapshot = store.hydrate(
+        pipeline.admit(
+            pipeline.build(_manifest_payload(), tmp_path / "rendered", OFFLINE_BUILD_CONFIG),
+            split="train",
+        )
+    )
     service = OpenRange(store=store)
     service.reset(snapshot.snapshot_id, EpisodeConfig(mode="joint_pool", green_enabled=True))
 

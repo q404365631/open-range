@@ -9,6 +9,7 @@ from open_range.episode_config import EpisodeConfig
 from open_range.manifest import validate_manifest
 from open_range.pipeline import BuildPipeline
 from open_range.store import FileSnapshotStore
+from tests.support import OFFLINE_BUILD_CONFIG
 
 
 def _manifest_payload() -> dict:
@@ -95,20 +96,22 @@ def test_build_config_threads_through_build_and_admission(tmp_path: Path):
         workflows_enabled=("helpdesk_ticketing",),
         weakness_families_enabled=("code_web",),
         topology_scale="small",
+        validation_profile="graph_only",
         red_reference_count=2,
         blue_reference_count=2,
     )
 
     candidate = pipeline.build(_manifest_payload(), tmp_path / "rendered", build_config)
     snapshot = pipeline.admit(candidate, split="train")
+    runtime_snapshot = store.hydrate(snapshot)
 
     assert candidate.build_config == build_config
     assert candidate.world.allowed_service_kinds == ("web_app", "email", "idp", "fileshare", "db", "siem")
     assert len(candidate.world.workflows) == 1
     assert len(candidate.world.users) == 4
     assert all(weak.family == "code_web" for weak in candidate.world.weaknesses)
-    assert 1 <= len(snapshot.reference_bundle.reference_attack_traces) <= 2
-    assert 1 <= len(snapshot.reference_bundle.reference_defense_traces) <= 2
+    assert 1 <= len(runtime_snapshot.reference_bundle.reference_attack_traces) <= 2
+    assert 1 <= len(runtime_snapshot.reference_bundle.reference_defense_traces) <= 2
 
 
 def test_build_config_can_filter_services_without_touching_manifest_schema(tmp_path: Path):
@@ -116,7 +119,7 @@ def test_build_config_can_filter_services_without_touching_manifest_schema(tmp_p
     candidate = pipeline.build(
         _manifest_payload(),
         tmp_path / "rendered-filtered",
-        BuildConfig(services_enabled=("web_app", "idp", "siem")),
+        BuildConfig(services_enabled=("web_app", "idp", "siem"), validation_profile="graph_only"),
     )
 
     assert candidate.world.allowed_service_kinds == ("web_app", "idp", "siem")

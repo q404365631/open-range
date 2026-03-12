@@ -26,12 +26,20 @@ strict manifest
 ## Runtime model
 
 - one snapshot defines one admitted world
+- public `Snapshot` records stay reference-free; runtime code hydrates `RuntimeSnapshot` when it needs the private `ReferenceBundle`
 - `reset(snapshot_id, episode_config)` selects or loads a stored snapshot and binds runtime mode
 - the env advances internal green activity until the next external decision point
 - `next_decision()` exposes only externally controlled red/blue actors
 - red and blue have separate observations and separate session state
 - admission uses private reference traces rather than a public golden path
 - admission is internally split into shared predicate logic, probe planning, probe execution, counterfactual remediation checks, and report scoring
+
+## Admission profiles
+
+- `full` and `graph_plus_live` require a live Kind backend
+- `no_necessity` is the strongest explicit offline admission profile
+- `graph_only` is the cheapest structural/offline profile
+- the package no longer silently downgrades `full` admission to offline-only validation
 
 ## Bootstrap traces
 

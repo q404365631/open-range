@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from open_range.episode_config import EpisodeConfig
 from open_range.runtime import ReferenceDrivenRuntime
 from open_range.runtime_types import Action
-from open_range.snapshot import Snapshot
+from open_range.snapshot import RuntimeSnapshot
 
 
 class _StrictModel(BaseModel):
@@ -32,13 +32,13 @@ class SimTrace(_StrictModel):
 
 
 class SimPlane(Protocol):
-    def generate_bootstrap_trace(self, snapshot: Snapshot, *, episode_seed: int) -> SimTrace: ...
+    def generate_bootstrap_trace(self, snapshot: RuntimeSnapshot, *, episode_seed: int) -> SimTrace: ...
 
 
 class ReferenceSimPlane:
     """Replay hidden reference traces through the public decision loop."""
 
-    def generate_bootstrap_trace(self, snapshot: Snapshot, *, episode_seed: int) -> SimTrace:
+    def generate_bootstrap_trace(self, snapshot: RuntimeSnapshot, *, episode_seed: int) -> SimTrace:
         attack_index = episode_seed % max(1, len(snapshot.reference_bundle.reference_attack_traces))
         defense_index = episode_seed % max(1, len(snapshot.reference_bundle.reference_defense_traces))
         attack_trace = snapshot.reference_bundle.reference_attack_traces[attack_index]

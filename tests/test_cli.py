@@ -112,6 +112,8 @@ def test_admit_command_persists_snapshot(tmp_path: Path):
             str(store_dir),
             "--split",
             "eval",
+            "--validation-profile",
+            "graph_only",
         ],
     )
 
@@ -139,6 +141,8 @@ def test_reset_command_loads_snapshot_from_store(tmp_path: Path):
             str(render_dir),
             "--store-dir",
             str(store_dir),
+            "--validation-profile",
+            "graph_only",
         ],
     )
     assert admit_result.exit_code == 0, admit_result.output

@@ -24,7 +24,7 @@ from open_range.runtime_types import (
     RuntimeEvent,
     ServiceHealth,
 )
-from open_range.snapshot import Snapshot
+from open_range.snapshot import RuntimeSnapshot
 
 
 class ReferenceDrivenRuntime:
@@ -39,7 +39,7 @@ class ReferenceDrivenRuntime:
         self.green_scheduler = green_scheduler or ScriptedGreenScheduler()
         self.action_backend = action_backend
         self.reward_engine = RewardEngine()
-        self._snapshot: Snapshot | None = None
+        self._snapshot: RuntimeSnapshot | None = None
         self._predicates: PredicateEngine | None = None
         self._episode_config = DEFAULT_EPISODE_CONFIG
         self._state = EpisodeState(snapshot_id="", episode_id="")
@@ -69,7 +69,7 @@ class ReferenceDrivenRuntime:
 
     def reset(
         self,
-        snapshot: Snapshot,
+        snapshot: RuntimeSnapshot,
         episode_config: EpisodeConfig = DEFAULT_EPISODE_CONFIG,
         *,
         reference_attack_index: int | None = None,

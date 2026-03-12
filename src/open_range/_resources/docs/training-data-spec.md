@@ -61,7 +61,7 @@ Default prompt/rendering rule:
 
 - exported row metadata may include weakness inventory and benchmark tags
 - default decision prompts used for SFT/eval must mirror the runtime observation surface
-- hidden weakness inventory, benchmark tags, and other oracle-like context must be excluded from the default prompt text unless an explicit research/debug export asks for them
+- hidden weakness inventory, benchmark tags, snapshot ids, lineage ids, split labels, teacher-source labels, and other evaluator-only context must be excluded from the default prompt text unless an explicit research/debug export asks for them
 
 ## Decision Surface
 

@@ -12,6 +12,7 @@ from open_range.render import EnterpriseSaaSKindRenderer
 from open_range.store import FileSnapshotStore
 from open_range.synth import EnterpriseSaaSWorldSynthesizer
 from open_range.weaknesses import CatalogWeaknessSeeder
+from tests.support import OFFLINE_BUILD_CONFIG, OFFLINE_REFERENCE_BUILD_CONFIG
 
 
 def _manifest_payload() -> dict:
@@ -148,7 +149,7 @@ def test_admission_controller_admits_seeded_world(tmp_path: Path):
     world = _build_seeded_world()
     artifacts = EnterpriseSaaSKindRenderer().render(world, _synth(world, tmp_path), tmp_path / "rendered")
 
-    reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
+    reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts, OFFLINE_REFERENCE_BUILD_CONFIG)
 
     assert report.admitted is True
     assert report.graph_ok is True
@@ -176,7 +177,7 @@ def test_admission_controller_offline_witness_can_ground_pinned_non_code_weaknes
     world = CatalogWeaknessSeeder().apply(EnterpriseSaaSManifestCompiler().compile(payload))
     artifacts = EnterpriseSaaSKindRenderer().render(world, _synth(world, tmp_path), tmp_path / "rendered-non-code")
 
-    reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
+    reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts, OFFLINE_REFERENCE_BUILD_CONFIG)
 
     assert report.admitted is True
 
@@ -201,7 +202,7 @@ def test_mutated_world_blue_reference_skips_blindspot_only_detection_targets(tmp
     )
     artifacts = EnterpriseSaaSKindRenderer().render(mutation, _synth(mutation, tmp_path), tmp_path / "rendered-mutation")
 
-    reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(mutation, artifacts)
+    reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(mutation, artifacts, OFFLINE_REFERENCE_BUILD_CONFIG)
 
     assert report.admitted is True
     defense_trace = reference_bundle.reference_defense_traces[0]
@@ -291,7 +292,7 @@ def test_admission_controller_can_run_optional_live_backend(tmp_path: Path):
     reference_bundle, report = LocalAdmissionController(
         mode="fail_fast",
         live_backend=FakeBackend(),
-    ).admit(world, artifacts)
+    ).admit(world, artifacts, OFFLINE_BUILD_CONFIG)
 
     assert reference_bundle.reference_attack_traces
     assert report.admitted is True
@@ -305,7 +306,7 @@ def test_admission_controller_rejects_world_without_telemetry(tmp_path: Path):
     broken = world.replace_edges(telemetry=())
     artifacts = EnterpriseSaaSKindRenderer().render(broken, _synth(broken, tmp_path), tmp_path / "rendered")
 
-    _bundle, report = LocalAdmissionController(mode="analysis").admit(broken, artifacts)
+    _bundle, report = LocalAdmissionController(mode="analysis").admit(broken, artifacts, OFFLINE_REFERENCE_BUILD_CONFIG)
 
     assert report.admitted is False
     failed = {
@@ -327,7 +328,7 @@ def test_admission_controller_rejects_public_secret_leak_in_artifacts(tmp_path: 
     )
     artifacts = EnterpriseSaaSKindRenderer().render(world, synth, tmp_path / "rendered")
 
-    _bundle, report = LocalAdmissionController(mode="analysis").admit(world, artifacts)
+    _bundle, report = LocalAdmissionController(mode="analysis").admit(world, artifacts, OFFLINE_REFERENCE_BUILD_CONFIG)
 
     assert report.admitted is False
     failed = {
@@ -350,7 +351,7 @@ def test_admission_controller_rejects_unlogged_critical_action_targets(tmp_path:
     broken = world.model_copy(update={"services": tuple(weakened_services)})
     artifacts = EnterpriseSaaSKindRenderer().render(broken, _synth(broken, tmp_path), tmp_path / "rendered")
 
-    _bundle, report = LocalAdmissionController(mode="analysis").admit(broken, artifacts)
+    _bundle, report = LocalAdmissionController(mode="analysis").admit(broken, artifacts, OFFLINE_REFERENCE_BUILD_CONFIG)
 
     assert report.admitted is False
     failed = {
@@ -366,11 +367,11 @@ def test_snapshot_store_persists_v1_snapshot(tmp_path: Path):
     world = _build_seeded_world()
     synth = _synth(world, tmp_path)
     artifacts = EnterpriseSaaSKindRenderer().render(world, synth, tmp_path / "rendered")
-    reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts)
+    reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(world, artifacts, OFFLINE_BUILD_CONFIG)
     store = FileSnapshotStore(tmp_path / "snapshots")
 
     snapshot = store.create(world, artifacts, reference_bundle, report, synth=synth)
-    loaded = store.load(snapshot.snapshot_id)
+    loaded = store.load_runtime(snapshot.snapshot_id)
 
     assert loaded.snapshot_id == snapshot.snapshot_id
     assert loaded.world_id == world.world_id

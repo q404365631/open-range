@@ -39,10 +39,14 @@ class OpenRange:
         strategy: str = "random",
         sample_seed: int | None = None,
     ) -> EpisodeState:
-        snapshot = self.store.load(snapshot_id) if snapshot_id is not None else self.store.sample(
-            split=split,
-            seed=0 if sample_seed is None else sample_seed,
-            strategy=strategy,
+        snapshot = (
+            self.store.load_runtime(snapshot_id)
+            if snapshot_id is not None
+            else self.store.sample_runtime(
+                split=split,
+                seed=0 if sample_seed is None else sample_seed,
+                strategy=strategy,
+            )
         )
         if self._live_release is not None and self.live_backend is not None:
             self.live_backend.teardown(self._live_release)

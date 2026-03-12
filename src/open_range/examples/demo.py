@@ -9,6 +9,7 @@ from typing import Any
 
 from open_range import (
     Action,
+    BuildConfig,
     BuildPipeline,
     EpisodeConfig,
     FileSnapshotStore,
@@ -17,6 +18,8 @@ from open_range import (
     TandemEpisodeDriver,
     load_bundled_manifest,
 )
+
+OFFLINE_BUILD_CONFIG = BuildConfig(validation_profile="graph_only")
 
 
 def _default_manifest_name() -> str:
@@ -49,11 +52,13 @@ def run_demo(
         root = Path(tmp)
         store = FileSnapshotStore(root / "snapshots")
         pipeline = BuildPipeline(store=store)
-        candidate = pipeline.build(payload, root / "rendered")
-        snapshot = pipeline.admit(candidate, split="train")
+        candidate = pipeline.build(payload, root / "rendered", OFFLINE_BUILD_CONFIG)
+        snapshot = store.hydrate(pipeline.admit(candidate, split="train"))
 
-        red_steps = snapshot.reference_bundle.reference_attack_traces[0].steps
-        blue_steps = snapshot.reference_bundle.reference_defense_traces[0].steps
+        attack_idx = seed % max(1, len(snapshot.reference_bundle.reference_attack_traces))
+        defense_idx = seed % max(1, len(snapshot.reference_bundle.reference_defense_traces))
+        red_steps = snapshot.reference_bundle.reference_attack_traces[attack_idx].steps
+        blue_steps = snapshot.reference_bundle.reference_defense_traces[defense_idx].steps
         red_agent = ScriptedRuntimeAgent(
             [
                 Action(

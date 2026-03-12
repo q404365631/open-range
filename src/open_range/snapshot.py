@@ -1,4 +1,4 @@
-"""rendered artifact and immutable snapshot models."""
+"""Rendered artifact, public snapshot, and runtime snapshot models."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from open_range.admission import ValidatorReport, ReferenceBundle
+from open_range.admission import ReferenceBundle, ValidatorReport
 from open_range.world_ir import WorldIR
 
 
@@ -43,10 +43,15 @@ class Snapshot(_StrictModel):
     file_assets: dict[str, str] = Field(default_factory=dict)
     identity_seed: dict[str, Any] = Field(default_factory=dict)
     validator_report: ValidatorReport
-    reference_bundle: ReferenceBundle
     world_hash: str
     parent_snapshot_id: str | None = None
     parent_world_id: str | None = None
+
+
+class RuntimeSnapshot(Snapshot):
+    """Internal runtime/admission snapshot hydrated with private references."""
+
+    reference_bundle: ReferenceBundle
 
 
 def world_hash(world: WorldIR) -> str:

@@ -211,6 +211,15 @@ Rules:
 - [x] Broaden native trace generation beyond pure reference imitation with additional scripted runtime traces and explicit teacher-source labeling
 - [x] Finish the public rename from `witness` to `reference` in docs and user-facing config language
 
+## Phase 23 - Architectural Review Fixes
+
+- [x] Keep `ReferenceBundle` private by default instead of embedding it in the public `Snapshot` model
+- [x] Make offline admission explicit by failing `full` admission when live Kind validation is unavailable
+- [x] Narrow default decision-training prompts to the true runtime observation surface and keep evaluator metadata out of prompt text
+- [x] Strengthen benchmark-aligned live objective grading for event-backed objectives beyond pure linked-event checks
+- [x] Exercise multiple reference traces in the user-facing eval/demo surfaces instead of always using the first path
+- [x] Align top-level contributor guidance with the standalone package architecture
+
 ## Audit notes
 
 Current status against `spec_final.md`:

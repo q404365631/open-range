@@ -15,6 +15,7 @@ from typing import Any
 
 from open_range import (
     Action,
+    BuildConfig,
     BuildPipeline,
     EpisodeConfig,
     FileSnapshotStore,
@@ -24,6 +25,8 @@ from open_range import (
     ReferenceDrivenRuntime,
     load_bundled_manifest,
 )
+
+OFFLINE_BUILD_CONFIG = BuildConfig(validation_profile="graph_only")
 
 
 def _default_manifest_name() -> str:
@@ -45,8 +48,10 @@ def _load_manifest(source: str | Path | None) -> dict[str, Any]:
 
 
 def _scripted_agents(snapshot):
-    red_steps = snapshot.reference_bundle.reference_attack_traces[0].steps
-    blue_steps = snapshot.reference_bundle.reference_defense_traces[0].steps
+    attack_idx = snapshot.seed % max(1, len(snapshot.reference_bundle.reference_attack_traces))
+    defense_idx = snapshot.seed % max(1, len(snapshot.reference_bundle.reference_defense_traces))
+    red_steps = snapshot.reference_bundle.reference_attack_traces[attack_idx].steps
+    blue_steps = snapshot.reference_bundle.reference_defense_traces[defense_idx].steps
     red_agent = ScriptedRuntimeAgent(
         [
             Action(
@@ -89,8 +94,8 @@ def run_bootstrap_demo(
         root = Path(tmp)
         store = FileSnapshotStore(root / "snapshots")
         pipeline = BuildPipeline(store=store)
-        candidate = pipeline.build(payload, root / "rendered")
-        snapshot = pipeline.admit(candidate, split="train")
+        candidate = pipeline.build(payload, root / "rendered", OFFLINE_BUILD_CONFIG)
+        snapshot = store.hydrate(pipeline.admit(candidate, split="train"))
 
         sim_plane = ReferenceSimPlane()
         bootstrap_trace = sim_plane.generate_bootstrap_trace(snapshot, episode_seed=seed)

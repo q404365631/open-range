@@ -43,6 +43,17 @@ uv sync --extra training
 This installs the small training stack used by the current branch:
 PyTorch, Transformers, Datasets, Accelerate, PEFT, and TRL.
 
+## Admission profiles
+
+Admission strength is explicit:
+
+- `full`: requires live Kind validation
+- `graph_plus_live`: requires live Kind validation without necessity probes
+- `no_necessity`: strongest offline profile, including reference, shortcut, and determinism checks
+- `graph_only`: offline structural validation only
+
+For offline workflows, pass the profile deliberately instead of relying on a silent fallback.
+
 ## Tiny Train/Eval Path
 
 The branch includes a branch-native tiny LoRA warmup path.
@@ -127,7 +138,7 @@ Key rules:
 - raw data comes from executed traces over admitted snapshots
 - `sim` and `runtime` traces stay explicitly separated
 - rows carry snapshot, world, world hash, lineage, mode, role, observation, candidates, chosen action, emitted events, reward delta, winner, and terminal reason
-- default decision prompts mirror the runtime observation surface and do not include hidden weakness inventory or benchmark tags
+- default decision prompts mirror the runtime observation surface and do not include hidden weakness inventory, benchmark tags, snapshot ids, lineage ids, or evaluator-only metadata
 - dataset splits are assigned by lineage root, not random row
 - derived SFT rows preserve `split` and lineage metadata
 - trace export writes clean role/source shards for red, blue, runtime, and sim subsets
@@ -173,6 +184,7 @@ manifest
 - representative service-native mitigations for exact web flaws plus bounded config/file mitigations for non-code weaknesses
 - Kind renderer with service payloads, firewall rules, and red/blue/green sandboxes
 - deterministic admission with optional live Kind checks
+- public immutable `Snapshot` records plus explicit runtime hydration into `RuntimeSnapshot` when private references are needed
 - shared predicate engine used by both admission and runtime terminal/objective reasoning
 - immutable snapshot store with train/eval splits
 - simulated-time runtime with `EpisodeConfig`, actor-specific observations, and `next_decision()`
@@ -191,23 +203,29 @@ manifest
 
 ```bash
 openrange build  -m manifests/tier1_basic.yaml -o /tmp/openrange-build
-openrange admit  -m manifests/tier1_basic.yaml -o /tmp/openrange-build --store-dir snapshots
+openrange admit  -m manifests/tier1_basic.yaml -o /tmp/openrange-build --store-dir snapshots --validation-profile graph_only
 openrange reset  --store-dir snapshots --sample-seed 7 --mode joint_pool
 ```
 
 ## Python usage
 
 ```python
-from open_range import BuildPipeline, EpisodeConfig, OpenRange, load_bundled_manifest
+from open_range import BuildConfig, BuildPipeline, EpisodeConfig, OpenRange, load_bundled_manifest
 
 pipeline = BuildPipeline()
-candidate = pipeline.build(load_bundled_manifest("tier1_basic.yaml"), "/tmp/openrange-build")
+candidate = pipeline.build(
+    load_bundled_manifest("tier1_basic.yaml"),
+    "/tmp/openrange-build",
+    BuildConfig(validation_profile="graph_only"),
+)
 snapshot = pipeline.admit(candidate)
 
 service = OpenRange()
 state = service.reset(snapshot.snapshot_id, EpisodeConfig(mode="joint_pool"))
 decision = service.next_decision()
 ```
+
+If library code needs private references for runtime tooling or offline analysis, hydrate explicitly through `FileSnapshotStore.load_runtime(...)` or `FileSnapshotStore.hydrate(snapshot)` rather than expecting them on the public `Snapshot` model.
 
 ## Demo
 

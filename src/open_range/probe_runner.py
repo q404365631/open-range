@@ -7,11 +7,11 @@ from open_range.execution import PodActionBackend
 from open_range.probe_planner import runtime_action
 from open_range.runtime import ReferenceDrivenRuntime
 from open_range.runtime_types import Action
-from open_range.snapshot import Snapshot
+from open_range.snapshot import RuntimeSnapshot
 
 
 def run_red_reference(
-    snapshot: Snapshot,
+    snapshot: RuntimeSnapshot,
     backend: PodActionBackend | None = None,
     *,
     episode_seed: int,
@@ -51,7 +51,7 @@ def run_red_reference(
     return score, events, health, outputs
 
 def run_blue_reference(
-    snapshot: Snapshot,
+    snapshot: RuntimeSnapshot,
     backend: PodActionBackend | None = None,
     *,
     trace_index: int = 0,

@@ -20,9 +20,10 @@ import random
 from pathlib import Path
 from typing import Any
 
-from open_range import generate_trace_dataset, load_bundled_manifest
+from open_range import BuildConfig, generate_trace_dataset, load_bundled_manifest
 
 DEFAULT_MODEL = "HuggingFaceTB/SmolLM2-360M-Instruct"
+TRACE_BUILD_CONFIG = BuildConfig(validation_profile="graph_only")
 
 
 def _tool_call_text(tool_calls: list[dict[str, Any]]) -> str:
@@ -225,6 +226,7 @@ def resolve_data_path(data: str | None, *, seed: int) -> Path:
         load_bundled_manifest("tier1_basic.yaml"),
         generated_root,
         manifest_source="tier1_basic.yaml",
+        build_config=TRACE_BUILD_CONFIG,
         roots=2,
         mutations_per_root=1,
         include_sim=True,

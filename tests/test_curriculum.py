@@ -7,6 +7,7 @@ from open_range.curriculum import FrontierMutationPolicy, PopulationStats, propo
 from open_range.pipeline import BuildPipeline
 from open_range.store import FileSnapshotStore
 from open_range.weaknesses import CatalogWeaknessSeeder
+from tests.support import OFFLINE_BUILD_CONFIG
 
 
 def _manifest_payload() -> dict:
@@ -156,7 +157,7 @@ def test_policy_mutate_is_deterministic_and_tracks_lineage():
 def test_mutated_child_is_admitted_and_can_live_in_eval_pool(tmp_path: Path):
     store = FileSnapshotStore(tmp_path / "snapshots")
     pipeline = BuildPipeline(store=store)
-    parent_candidate = pipeline.build(_manifest_payload(), tmp_path / "parent-render")
+    parent_candidate = pipeline.build(_manifest_payload(), tmp_path / "parent-render", OFFLINE_BUILD_CONFIG)
     parent_snapshot = pipeline.admit(parent_candidate, split="train")
 
     policy = FrontierMutationPolicy()
@@ -175,7 +176,7 @@ def test_mutated_child_is_admitted_and_can_live_in_eval_pool(tmp_path: Path):
         ),
         child_seed=3030,
     )
-    child_snapshot = pipeline.admit_child(child_world, tmp_path / "child-render", split="eval")
+    child_snapshot = pipeline.admit_child(child_world, tmp_path / "child-render", split="eval", build_config=OFFLINE_BUILD_CONFIG)
 
     assert child_snapshot.parent_world_id == parent_snapshot.world.world_id
     assert child_snapshot.validator_report.admitted is True
@@ -187,7 +188,10 @@ def test_mutated_child_is_admitted_and_can_live_in_eval_pool(tmp_path: Path):
 def test_propose_mutations_loads_best_parent_from_store(tmp_path: Path):
     store = FileSnapshotStore(tmp_path / "snapshots")
     pipeline = BuildPipeline(store=store)
-    parent_snapshot = pipeline.admit(pipeline.build(_manifest_payload(), tmp_path / "render"), split="train")
+    parent_snapshot = pipeline.admit(
+        pipeline.build(_manifest_payload(), tmp_path / "render", OFFLINE_BUILD_CONFIG),
+        split="train",
+    )
 
     children = propose_mutations(
         [

@@ -26,7 +26,7 @@ from open_range.objectives import evaluate_objective_grader_live
 from open_range.predicates import PredicateEngine
 from open_range.probe_planner import build_reference_bundle
 from open_range.probe_runner import run_blue_reference, run_red_reference
-from open_range.snapshot import KindArtifacts, Snapshot, world_hash
+from open_range.snapshot import KindArtifacts, RuntimeSnapshot, Snapshot, world_hash
 from open_range.world_ir import ServiceSpec, WorldIR
 
 
@@ -109,6 +109,25 @@ class LocalAdmissionController:
             health_info.update(live_info)
             if self.mode == "fail_fast" and not live_stage.passed:
                 continue_running = False
+        elif self._profile_requires_live(build_config):
+            stages.append(
+                ValidatorStageReport(
+                    name="kind_live",
+                    passed=False,
+                    checks=(
+                        ValidatorCheckReport(
+                            name="live_backend_required",
+                            passed=False,
+                            details={
+                                "validation_profile": build_config.validation_profile,
+                                "live_backend_mode": health_info["live_backend_mode"],
+                            },
+                            error="live Kind validation is required for this admission profile",
+                        ),
+                    ),
+                )
+            )
+            continue_running = False
 
         admitted = all(stage.passed for stage in stages)
         summary_fields = report_summary(
@@ -268,6 +287,10 @@ class LocalAdmissionController:
             checks=tuple(checks),
         )
         return stage, live_info
+
+    @staticmethod
+    def _profile_requires_live(build_config: BuildConfig) -> bool:
+        return build_config.validation_profile in {"full", "graph_plus_live"}
 
     def _auto_live_backend(self, build_config: BuildConfig) -> LiveBackend | None:
         if not self.auto_live:
@@ -702,7 +725,7 @@ def _reference_weakness_id(trace) -> str:
     return ""
 
 
-def _ephemeral_snapshot(world: WorldIR, artifacts: KindArtifacts, reference_bundle: ReferenceBundle) -> Snapshot:
+def _ephemeral_snapshot(world: WorldIR, artifacts: KindArtifacts, reference_bundle: ReferenceBundle) -> RuntimeSnapshot:
     predicates = PredicateEngine(world)
     db_seed_state = {"services": [service.id for service in world.services if service.kind == "db"]}
     mail_state = {"mailboxes": [persona.mailbox for persona in world.green_personas if persona.mailbox]}
@@ -729,7 +752,7 @@ def _ephemeral_snapshot(world: WorldIR, artifacts: KindArtifacts, reference_bund
         world_hash=world_hash(world),
         summary="admission-live-check",
     )
-    return Snapshot(
+    return RuntimeSnapshot(
         snapshot_id=f"{world.world_id}-admission",
         world_id=world.world_id,
         seed=world.seed,
@@ -773,7 +796,7 @@ def _live_service_smoke_check(world: WorldIR, release) -> ValidatorCheckReport:
     )
 
 
-def _live_red_reference_check(snapshot: Snapshot, release, backend: PodActionBackend) -> ValidatorCheckReport:
+def _live_red_reference_check(snapshot: RuntimeSnapshot, release, backend: PodActionBackend) -> ValidatorCheckReport:
     predicates = PredicateEngine(snapshot.world)
     per_trace = []
     passed = True
@@ -819,7 +842,7 @@ def _live_red_reference_check(snapshot: Snapshot, release, backend: PodActionBac
     )
 
 
-def _live_blue_reference_check(snapshot: Snapshot, backend: PodActionBackend) -> ValidatorCheckReport:
+def _live_blue_reference_check(snapshot: RuntimeSnapshot, backend: PodActionBackend) -> ValidatorCheckReport:
     per_trace = []
     passed = True
     for trace_index, trace in enumerate(snapshot.reference_bundle.reference_defense_traces):
@@ -855,7 +878,7 @@ def _live_siem_ingest_check(release) -> ValidatorCheckReport:
     )
 
 
-def _live_determinism_check(snapshot: Snapshot, backend: PodActionBackend) -> ValidatorCheckReport:
+def _live_determinism_check(snapshot: RuntimeSnapshot, backend: PodActionBackend) -> ValidatorCheckReport:
     trace_results = []
     passed = True
     for trace_index, trace in enumerate(snapshot.reference_bundle.reference_attack_traces):
@@ -895,7 +918,7 @@ def _live_determinism_check(snapshot: Snapshot, backend: PodActionBackend) -> Va
     )
 
 
-def _live_necessity_check(snapshot: Snapshot, release, backend: PodActionBackend) -> ValidatorCheckReport:
+def _live_necessity_check(snapshot: RuntimeSnapshot, release, backend: PodActionBackend) -> ValidatorCheckReport:
     trace_bindings = []
     for trace_index, trace in enumerate(snapshot.reference_bundle.reference_attack_traces):
         weakness_id = _reference_weakness_id(trace)
@@ -969,7 +992,7 @@ def _live_necessity_check(snapshot: Snapshot, release, backend: PodActionBackend
     )
 
 
-def _live_shortcut_probe_check(snapshot: Snapshot, release) -> ValidatorCheckReport:
+def _live_shortcut_probe_check(snapshot: RuntimeSnapshot, release) -> ValidatorCheckReport:
     host_by_id = {host.id: host for host in snapshot.world.hosts}
     service_by_id = {service.id: service for service in snapshot.world.services}
     public_services = [
@@ -1012,7 +1035,7 @@ def _service_probe_command(service: ServiceSpec) -> str:
     return f"nc -z -w 3 {service.id} {port}"
 
 
-def _web_shortcut_findings(snapshot: Snapshot, release, public_services: list[ServiceSpec]) -> list[str]:
+def _web_shortcut_findings(snapshot: RuntimeSnapshot, release, public_services: list[ServiceSpec]) -> list[str]:
     findings: list[str] = []
     for service in public_services:
         if service.kind != "web_app":
