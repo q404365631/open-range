@@ -1,15 +1,35 @@
-# OpenRange
+<div align="center">
+  <h1>OpenRange</h1>
+  <img src="assets/evolving_gym_hero.png" alt="OpenRange: multi-agent cybersecurity range" width="800" />
+  <br />
+  <br />
+  <img src="https://img.shields.io/badge/Package-openenv--open--range-blue" alt="Package: openenv-open-range" />
+  <img src="https://img.shields.io/badge/Runtime-red%2Fblue%2Fgreen-red" alt="Runtime: red/blue/green" />
+  <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0" />
+</div>
 
-OpenRange is a manifest-first red/blue/green cyber range packaged as an installable Python control plane.
+OpenRange is a manifest-first red/blue/green cyber range packaged as an installable Python control plane. It turns strict manifests into admitted snapshots, stores immutable builds, and exposes a small runtime/CLI for demos, evaluation, and trace generation.
 
-The supported surface is:
+This branch is a package-first rewrite of the project. It keeps the core idea from the older README, varied adversarial cyber environments with grounded validation, but the public surface here is the Python package under [`src/open_range`](src/open_range), not the legacy OpenEnv server/client stack from `main`.
+
+## Why OpenRange
+
+Static CTFs are useful, but they are a weak training target for general cyber agents: they are hand-authored, fixed, and easy to overfit. OpenRange is aimed at the opposite shape: bounded families of enterprise-like environments that can be compiled, admitted, mutated, replayed, and used to generate branch-native traces.
+
+The supported surface on this branch is:
 
 - strict public manifests for the bounded `enterprise_saas_v1` family
-- a Python build/admit/store/runtime API under [`src/open_range`](/home/talian/priv/open-range/src/open_range)
+- a Python build/admit/store/runtime API under [`src/open_range`](src/open_range)
 - a small CLI exposed as `openrange`
 - packaged chart assets, schemas, docs, and manifest examples
 
-The legacy OpenEnv server/client stack and public golden-path model are not part of the current package surface.
+## Start here
+
+- [Architecture](docs/architecture.md)
+- [Training Data Spec](docs/training-data-spec.md)
+- [Benchmark Offensive Coverage](docs/benchmark-offensive-coverage.md)
+- [Effect Grounding](docs/effect-grounding.md)
+- [Weakness Lifecycle](docs/weakness-lifecycle.md)
 
 ## Package shape
 
@@ -134,7 +154,7 @@ snapshots.
 
 The canonical contract is documented in:
 
-- [docs/training-data-spec.md](/home/talian/priv/open-range/docs/training-data-spec.md)
+- [docs/training-data-spec.md](docs/training-data-spec.md)
 
 Key rules:
 
@@ -151,8 +171,8 @@ Key rules:
 
 The offensive slice is documented separately in:
 
-- [docs/benchmark-offensive-coverage.md](/home/talian/priv/open-range/docs/benchmark-offensive-coverage.md)
-- [docs/effect-grounding.md](/home/talian/priv/open-range/docs/effect-grounding.md)
+- [docs/benchmark-offensive-coverage.md](docs/benchmark-offensive-coverage.md)
+- [docs/effect-grounding.md](docs/effect-grounding.md)
 
 Current implementation points:
 
@@ -311,7 +331,7 @@ python scripts/eval_model_rollouts.py \
 
 ## Container image
 
-The root [Dockerfile](/home/talian/priv/open-range/Dockerfile) now builds a CLI image for the standalone package:
+The root [Dockerfile](Dockerfile) now builds a CLI image for the standalone package:
 
 ```bash
 docker build -t openrange .
