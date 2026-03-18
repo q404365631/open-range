@@ -33,7 +33,7 @@ def test_bundled_schemas_match_checked_in_schemas():
         assert isinstance(load_bundled_schema(name), dict)
 
 
-def test_bundled_docs_are_readable():
+def test_load_bundled_doc_reads_source_of_truth_docs():
     contents = load_bundled_doc("architecture.md")
     weakness_contents = load_bundled_doc("weakness-lifecycle.md")
     npc_contents = load_bundled_doc("npc-profiles.md")
@@ -42,3 +42,8 @@ def test_bundled_docs_are_readable():
     assert "Blue has two distinct control actions" in weakness_contents
     assert "NPC Profile Spec" in npc_contents
     assert "Current Scope" in npc_contents
+
+
+def test_repo_checkout_uses_single_docs_source_of_truth():
+    assert bundled_docs_dir().resolve() == Path("docs").resolve()
+    assert tuple((Path("src/open_range/_resources/docs")).glob("*.md")) == ()
