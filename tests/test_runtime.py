@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import gc
+import statistics
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -56,6 +59,40 @@ def _code_web_response(
     return ExecResult(
         stdout=str(payload.get("expect_contains", "")), stderr="", exit_code=0
     )
+
+
+def _benchmark_runtime_ms_per_action(
+    snapshot, *, audit_enabled: bool, action_count: int
+) -> float:
+    runtime = ReferenceDrivenRuntime()
+    runtime.reset(
+        snapshot,
+        EpisodeConfig(
+            mode="joint_pool",
+            green_enabled=False,
+            episode_horizon_minutes=float(action_count),
+            audit={"enabled": audit_enabled},
+        ),
+    )
+
+    start = time.perf_counter_ns()
+    for _ in range(action_count):
+        decision = runtime.next_decision()
+        if decision.actor == "red":
+            action = Action(
+                actor_id="red",
+                role="red",
+                kind="shell",
+                payload={
+                    "command": "bash -lc 'git clone https://example.com/upstream.git'"
+                },
+            )
+        else:
+            action = Action(actor_id="blue", role="blue", kind="sleep", payload={})
+        runtime.act(decision.actor, action)
+    runtime.score()
+    elapsed_ns = time.perf_counter_ns() - start
+    return elapsed_ns / 1_000_000 / action_count
 
 
 def test_joint_pool_next_decision_returns_actor_specific_observations(tmp_path: Path):
@@ -240,6 +277,246 @@ def test_blue_only_live_can_win_by_detect_and_contain(tmp_path: Path):
 
     assert contain.done is True
     assert runtime.score().winner == "blue"
+
+
+def test_runtime_flags_mock_git_clone_in_episode_audit(tmp_path: Path):
+    snapshot = _snapshot(tmp_path)
+    runtime = ReferenceDrivenRuntime()
+    runtime.reset(
+        snapshot,
+        EpisodeConfig(
+            mode="red_only",
+            green_enabled=False,
+            audit={
+                "suspicious_patterns": (r"\bgit\s+clone\b",),
+                "minimum_actions_for_collapse": 1,
+            },
+        ),
+    )
+
+    decision = runtime.next_decision()
+    assert decision.actor == "red"
+    result = runtime.act(
+        "red",
+        Action(
+            actor_id="red",
+            role="red",
+            kind="shell",
+            payload={"command": "git clone https://example.com/upstream.git"},
+        ),
+    )
+
+    audit = runtime.score().audit
+    assert audit is not None
+    assert audit.suspicious_actions
+    assert audit.suspicious_actions[0].matched_patterns == (r"\bgit\s+clone\b",)
+    assert audit.suspicious_actions[0].fingerprint_prefix == "git clone"
+    assert result.emitted_events[0].event_type == "SuspiciousActionObserved"
+    assert result.emitted_events[0].suspicious is True
+    assert audit.suspicious_event_ids == (result.emitted_events[0].id,)
+
+
+def test_runtime_hides_suspicious_audit_only_events_from_decision_observations(
+    tmp_path: Path,
+):
+    snapshot = _snapshot(tmp_path)
+    runtime = ReferenceDrivenRuntime()
+    runtime.reset(
+        snapshot,
+        EpisodeConfig(
+            mode="joint_pool",
+            green_enabled=False,
+            audit={"suspicious_patterns": (r"\bgit\s+clone\b",)},
+        ),
+    )
+
+    assert runtime.next_decision().actor == "red"
+    runtime.act(
+        "red",
+        Action(
+            actor_id="red",
+            role="red",
+            kind="shell",
+            payload={"command": "git clone https://example.com/upstream.git"},
+        ),
+    )
+    decision = runtime.next_decision()
+
+    assert decision.actor == "blue"
+    assert all(
+        event.event_type != "SuspiciousActionObserved"
+        for event in decision.obs.visible_events
+    )
+
+
+def test_runtime_audit_only_events_do_not_trigger_green_reactions(tmp_path: Path):
+    snapshot = _snapshot(tmp_path)
+    runtime = ReferenceDrivenRuntime()
+    runtime.reset(
+        snapshot,
+        EpisodeConfig(
+            mode="joint_pool",
+            green_enabled=True,
+            audit={"suspicious_patterns": (r"\bgit\s+clone\b",)},
+        ),
+    )
+
+    assert runtime.next_decision().actor == "red"
+    runtime.act(
+        "red",
+        Action(
+            actor_id="red",
+            role="red",
+            kind="shell",
+            payload={"command": "git clone https://example.com/upstream.git"},
+        ),
+    )
+    assert runtime.next_decision().actor == "blue"
+    runtime.act(
+        "blue",
+        Action(actor_id="blue", role="blue", kind="sleep", payload={}),
+    )
+    runtime.next_decision()
+
+    assert any(
+        event.event_type == "SuspiciousActionObserved"
+        for event in runtime.export_events()
+    )
+    assert not any(
+        event.actor == "green" and event.event_type == "DetectionAlertRaised"
+        for event in runtime.export_events()
+    )
+
+
+def test_runtime_audit_overhead_stays_below_issue_target(tmp_path: Path):
+    snapshot = _snapshot(tmp_path)
+    action_count = 400
+    warmup_trials = 1
+    measured_trials = 3
+    overheads: list[float] = []
+
+    for _ in range(warmup_trials):
+        _benchmark_runtime_ms_per_action(
+            snapshot, audit_enabled=False, action_count=action_count
+        )
+        _benchmark_runtime_ms_per_action(
+            snapshot, audit_enabled=True, action_count=action_count
+        )
+
+    for _ in range(measured_trials):
+        gc.collect()
+        without_audit = _benchmark_runtime_ms_per_action(
+            snapshot, audit_enabled=False, action_count=action_count
+        )
+        gc.collect()
+        with_audit = _benchmark_runtime_ms_per_action(
+            snapshot, audit_enabled=True, action_count=action_count
+        )
+        overheads.append(with_audit - without_audit)
+
+    median_overhead_ms = statistics.median(overheads)
+    assert median_overhead_ms < 50.0, (
+        "audit overhead exceeded the issue target of 50 ms/action; "
+        f"measured median overhead={median_overhead_ms:.3f} ms/action "
+        f"across {measured_trials} trials with {action_count} actions/trial "
+        f"(raw={overheads!r})"
+    )
+
+
+def test_runtime_tags_emitted_events_when_a_live_action_matches_audit_pattern(
+    tmp_path: Path,
+):
+    snapshot = _snapshot(tmp_path)
+
+    class FakePods:
+        def __init__(self, pod_ids):
+            self.pod_ids = pod_ids
+
+        async def exec(
+            self, service: str, cmd: str, timeout: float = 30.0
+        ) -> ExecResult:
+            del timeout
+            if service == "sandbox-red":
+                seeded = _code_web_response(snapshot, cmd, set())
+                if seeded is not None:
+                    return seeded
+            return ExecResult(stdout=f"{service}:{cmd}", stderr="", exit_code=0)
+
+        async def is_healthy(self, service: str) -> bool:
+            return service in self.pod_ids
+
+    pod_ids = {
+        service.id: f"ns/{service.id}-pod" for service in snapshot.world.services
+    }
+    pod_ids["sandbox-red"] = "ns/sandbox-red-pod"
+    pod_ids["sandbox-blue"] = "ns/sandbox-blue-pod"
+    for persona in snapshot.world.green_personas:
+        pod_ids[f"sandbox-green-{persona.id.replace('_', '-').lower()}"] = (
+            f"ns/{persona.id}-pod"
+        )
+
+    backend = PodActionBackend()
+    backend.bind(
+        snapshot, SimpleNamespace(release_name="or-test", pods=FakePods(pod_ids))
+    )
+    runtime = ReferenceDrivenRuntime(action_backend=backend)
+    runtime.reset(
+        snapshot,
+        EpisodeConfig(
+            mode="joint_pool",
+            green_enabled=False,
+            audit={"suspicious_patterns": (r"api svc-web /search\.php",)},
+        ),
+    )
+
+    first_step = snapshot.reference_bundle.reference_attack_traces[0].steps[0]
+    assert runtime.next_decision().actor == "red"
+    result = runtime.act(
+        "red",
+        Action(
+            actor_id="red",
+            role="red",
+            kind=first_step.kind,
+            payload={"target": first_step.target, **first_step.payload},
+        ),
+    )
+
+    assert result.emitted_events
+    assert result.emitted_events[0].suspicious is True
+    assert result.emitted_events[0].suspicious_reasons == (r"api svc-web /search\.php",)
+    audit = runtime.score().audit
+    assert audit is not None
+    assert audit.suspicious_event_ids == (result.emitted_events[0].id,)
+
+
+def test_runtime_serialized_events_keep_suspicious_fields(tmp_path: Path):
+    snapshot = _snapshot(tmp_path)
+    runtime = ReferenceDrivenRuntime()
+    runtime.reset(
+        snapshot,
+        EpisodeConfig(
+            mode="joint_pool",
+            green_enabled=False,
+            audit={"suspicious_patterns": (r"api svc-web /search\.php",)},
+        ),
+    )
+
+    first_step = snapshot.reference_bundle.reference_attack_traces[0].steps[0]
+    assert runtime.next_decision().actor == "red"
+    runtime.act(
+        "red",
+        Action(
+            actor_id="red",
+            role="red",
+            kind=first_step.kind,
+            payload={"target": first_step.target, **first_step.payload},
+        ),
+    )
+
+    payload = runtime.export_events()[0].model_dump(mode="json")
+
+    assert payload["suspicious"] is True
+    assert payload["suspicious_reasons"] == [r"api svc-web /search\.php"]
 
 
 def test_runtime_hard_done_rejects_more_decisions_and_actions(tmp_path: Path):
