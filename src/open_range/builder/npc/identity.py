@@ -138,7 +138,9 @@ def generate_profiles(
 
 def _pool_for_role(role: str) -> list[dict]:
     lowered = role.lower()
-    if any(kw in lowered for kw in ("it", "admin", "engineer", "devops", "security")):
+    if any(kw in lowered for kw in ("soc", "security", "infosec")):
+        return _SECURITY_PROFILES
+    if any(kw in lowered for kw in ("it", "admin", "engineer", "devops")):
         return _IT_PROFILES
     if any(kw in lowered for kw in ("manager", "director", "vp", "executive", "chief")):
         return _EXEC_PROFILES
@@ -150,6 +152,23 @@ def _pool_for_role(role: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Template profile pools
 # ---------------------------------------------------------------------------
+
+_SECURITY_PROFILES = [
+    {
+        "full_name": "Riley Kim",
+        "location": "San Francisco office, 3rd floor (SOC room)",
+        "working_hours": "7am-4pm PT — early shift, monitors overnight alerts first thing",
+        "work_style": "Methodical and alert. Triages by severity. Keeps a running incident log.",
+        "communication_style": "Precise and factual. Writes detailed incident reports. Avoids speculation.",
+        "preferred_modality": "email",
+        "projects": ("SIEM rule tuning", "Incident response playbook update"),
+        "responsibilities": "Monitors {dept} alerts, triages incidents, coordinates response with IT",
+        "background": "Joined from a managed security provider 3 years ago. Calm under pressure — handled the ransomware scare last year without breaking a sweat. The team trusts Riley's judgment on threat severity.",
+        "years_at_company": 3,
+        "personality": {"mood": "focused", "disposition": "cautious", "interpersonal_style": "terse",
+                        "work_ethic": "diligent", "risk_tolerance": 0.15, "chattiness": 0.2},
+    },
+]
 
 _IT_PROFILES = [
     {

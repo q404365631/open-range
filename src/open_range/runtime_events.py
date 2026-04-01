@@ -75,6 +75,8 @@ def green_events_for_action(
         )
     if branch == "npc_chat":
         recipient = str(action.payload.get("recipient", "")) or target
+        modality = str(action.payload.get("modality", "email"))
+        surface = "svc-chat" if modality == "chat" else "svc-email"
         return (
             emit_event(
                 event_type="BenignUserAction",
@@ -82,7 +84,7 @@ def green_events_for_action(
                 source_entity=action.actor_id,
                 target_entity=recipient,
                 malicious=False,
-                observability_surfaces=("svc-email",),
+                observability_surfaces=(surface,),
             ),
         )
     return (

@@ -105,10 +105,18 @@ class NPCManager:
             self._tasks.append(task)
 
         self._running = True
-        logger.info(
-            "NPCManager started %d agents (mock=%s, online=%s)",
-            len(self._tasks), self._mock_mode, online,
-        )
+        if online:
+            logger.info(
+                "NPCManager started %d online agents — ensure "
+                "green_branch_enabled=False in EpisodeConfig to avoid "
+                "duplicate reactions from both scheduler and agents",
+                len(self._agents),
+            )
+        else:
+            logger.info(
+                "NPCManager started %d agents (mock=%s)",
+                len(self._tasks), self._mock_mode,
+            )
 
     async def stop(self) -> None:
         """Cancel all NPC agent tasks."""

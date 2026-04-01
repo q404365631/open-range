@@ -19,8 +19,8 @@ from open_range.world_ir import GreenPersona
 
 
 class TestDefaultPersonas:
-    def test_returns_four_personas(self):
-        assert len(default_personas()) == 4
+    def test_returns_five_personas(self):
+        assert len(default_personas()) == 5
 
     def test_all_are_green_persona_instances(self):
         assert all(isinstance(p, GreenPersona) for p in default_personas())
@@ -99,7 +99,7 @@ class TestNPCManagerMockMode:
             return count
 
         count = asyncio.run(_go())
-        assert count == 4
+        assert count == 5
 
     def test_uses_default_personas_when_snapshot_has_none(self):
         async def _go():
@@ -111,7 +111,7 @@ class TestNPCManagerMockMode:
             await mgr.stop()
             return count
 
-        assert asyncio.run(_go()) == 4
+        assert asyncio.run(_go()) == 5
 
     def test_stop_cancels_all_tasks(self):
         async def _go():
@@ -160,7 +160,7 @@ class TestNPCManagerMockMode:
             await mgr.stop()
             return count
 
-        assert asyncio.run(_go()) == 4
+        assert asyncio.run(_go()) == 5
 
 
 # ---------------------------------------------------------------------------

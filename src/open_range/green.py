@@ -29,6 +29,7 @@ class GreenScheduler(Protocol):
 # every 1 minute.  These constants gate per-persona action timing.
 _MIN_CADENCE = 5
 _MAX_CADENCE = 15
+_SECURITY_DEPARTMENTS = frozenset(("security", "infosec", "soc"))
 
 
 class ScriptedGreenScheduler:
@@ -61,6 +62,8 @@ class ScriptedGreenScheduler:
         # Per-persona cadence: each persona acts at their own pace
         self._next_action_slot: dict[str, int] = {}
         # Pending inbox: recipient_id → [sender_id, …]
+        # Used in offline mode only; in online mode agents handle reads
+        # via MessageStore + the observation system instead.
         self._pending_inbox: dict[str, list[str]] = defaultdict(list)
         # Async-to-sync bridge (optional — populated for online mode)
         self._action_outbox: ActionOutbox | None = action_outbox
@@ -88,6 +91,17 @@ class ScriptedGreenScheduler:
             self._planners[persona.id] = planner
             self._next_action_slot[persona.id] = 0
             self._event_inboxes[persona.id] = EventInbox()
+        # Security personas receive detection alerts; others don't
+        self._security_persona_ids: set[str] = {
+            p.id for p in snapshot.world.green_personas
+            if p.department.lower() in _SECURITY_DEPARTMENTS
+        }
+        # Map service → persona IDs whose tasks use that service
+        self._service_to_personas: dict[str, set[str]] = defaultdict(set)
+        for persona in snapshot.world.green_personas:
+            for routine in persona.routine:
+                svc = _routine_service(routine)
+                self._service_to_personas[svc].add(persona.id)
         if self._sim_clock is not None:
             self._sim_clock.reset()
 
@@ -122,15 +136,20 @@ class ScriptedGreenScheduler:
             or not event.malicious
         ):
             return
-        personas = sorted(
+        # In online mode, RuntimeNPCAgents handle their own reactions via
+        # the observation system.  Skip scheduler-generated reactions to
+        # avoid duplicates.
+        if self._action_outbox is not None:
+            return
+        all_personas = sorted(
             self._snapshot.world.green_personas,
             key=lambda persona: (-persona.awareness, persona.id),
         )
-        if not personas:
+        if not all_personas:
             return
         # Record the malicious event in the most-aware persona's memory so
         # future susceptibility calculations reflect prior incidents.
-        observer = personas[0]
+        observer = all_personas[0]
         ms = self._memory_streams.get(observer.id)
         if ms is not None:
             high_severity = event.event_type in {
@@ -143,6 +162,9 @@ class ScriptedGreenScheduler:
                 importance=8.0 if high_severity else 5.0,
                 tags=[event.event_type.lower(), "malicious", "security"],
             )
+        # Prefer security personas for reactions; fall back to all if none
+        security_personas = [p for p in all_personas if p.id in self._security_persona_ids]
+        responders = security_personas if security_personas else all_personas
         backend = self._episode_config.green_branch_backend
         slot = floor(event.time) + 1
         target = event.target_entity
@@ -151,12 +173,12 @@ class ScriptedGreenScheduler:
             return
         self._scheduled_reactions.add(reaction_key)
         if backend == "scripted":
-            self._schedule_scripted_reaction(event, personas, slot)
+            self._schedule_scripted_reaction(event, responders, slot)
             return
         if backend == "small_llm":
-            self._schedule_small_llm_reaction(event, personas, slot)
+            self._schedule_small_llm_reaction(event, responders, slot)
             return
-        self._schedule_workflow_orchestrator_reaction(event, personas, slot)
+        self._schedule_workflow_orchestrator_reaction(event, responders, slot)
 
     def _routine_actions(self, slot: int) -> tuple[Action, ...]:
         assert self._snapshot is not None
@@ -319,23 +341,36 @@ class ScriptedGreenScheduler:
     def _route_event_to_inboxes(self, event: RuntimeEvent) -> None:
         """Push an event only to the NPC inboxes that should see it.
 
-        - Directed at a persona (email) → only that persona
-        - Malicious / security alert   → all personas (network-visible)
-        - Routine service activity     → nobody (no reaction needed)
+        Routing rules (realism-driven):
+        - Directed at a persona (email/chat/phishing) → only that persona
+        - DetectionAlertRaised / SuspiciousActionObserved → security team only
+        - ServiceDegraded → personas whose tasks use the affected service
+        - Undetected malicious events → nobody (invisible until detected)
+        - Routine BenignUserAction → nobody
         """
         target = event.target_entity
-        # Directed at a specific NPC (e.g. incoming email)
+        # Directed at a specific NPC (e.g. incoming email, phishing)
         if target in self._event_inboxes:
             self._event_inboxes[target].push(event)
             return
-        # Security events: broadcast to all
-        if event.malicious or event.event_type in {
-            "DetectionAlertRaised", "ServiceDegraded",
-        }:
-            for inbox in self._event_inboxes.values():
-                inbox.push(event)
+        # Detection alerts → security team only
+        if event.event_type in ("DetectionAlertRaised", "SuspiciousActionObserved"):
+            for pid in self._security_persona_ids:
+                inbox = self._event_inboxes.get(pid)
+                if inbox is not None:
+                    inbox.push(event)
             return
-        # Routine BenignUserAction on services: no NPC needs to react
+        # Service degradation → only personas who use that service
+        if event.event_type == "ServiceDegraded":
+            affected = self._service_to_personas.get(target, set())
+            for pid in affected:
+                inbox = self._event_inboxes.get(pid)
+                if inbox is not None:
+                    inbox.push(event)
+            return
+        # Undetected malicious events (credential theft, lateral movement, etc.)
+        # are invisible — no NPC is notified.
+        # Routine BenignUserAction on services: no NPC needs to react.
 
     def _reactive_actions(self, slot: int) -> tuple[Action, ...]:
         if not self._episode_config.green_branch_enabled:

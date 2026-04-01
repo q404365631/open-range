@@ -335,6 +335,7 @@ class TestReplyOnSameMedium:
         clock.advance(0.0)
         inbox.push(_event("m1", source_entity="janet.liu", target_entity="bob.smith"))
         agent._process_inbox()
+        agent._process_pending_observations()
         # read
         agent._maybe_submit_next()
         read_actions = outbox.drain()
@@ -363,6 +364,7 @@ class TestReplyOnSameMedium:
         clock.advance(0.0)
         inbox.push(_event("m2", source_entity="dan.wu", target_entity="bob.smith"))
         agent._process_inbox()
+        agent._process_pending_observations()
         # read
         agent._maybe_submit_next()
         read_actions = outbox.drain()
@@ -389,6 +391,7 @@ class TestReplyOnSameMedium:
         clock.advance(0.0)
         inbox.push(_event("m3", source_entity="dan.wu", target_entity="bob.smith"))
         agent._process_inbox()
+        agent._process_pending_observations()
         agent._maybe_submit_next()  # read
         agent._maybe_submit_next()  # reply
         # Dan should have a reply waiting
@@ -412,6 +415,7 @@ class TestReplyOnSameMedium:
 
         async def _go():
             await agent._process_inbox_async()
+            await agent._process_pending_observations_async()
             await agent._maybe_submit_next_async()  # read
             await agent._maybe_submit_next_async()  # reply
 
@@ -440,6 +444,7 @@ class TestReadActionModality:
         clock.advance(0.0)
         inbox.push(_event("r1", source_entity="janet.liu", target_entity="bob.smith"))
         agent._process_inbox()
+        agent._process_pending_observations()
         agent._maybe_submit_next()
         actions = outbox.drain()
         assert actions[0].payload["service"] == "svc-email"
@@ -456,6 +461,7 @@ class TestReadActionModality:
         clock.advance(0.0)
         inbox.push(_event("r2", source_entity="dan.wu", target_entity="bob.smith"))
         agent._process_inbox()
+        agent._process_pending_observations()
         agent._maybe_submit_next()
         actions = outbox.drain()
         assert actions[0].payload["service"] == "svc-chat"
@@ -473,6 +479,7 @@ class TestReadActionModality:
         clock.advance(0.0)
         inbox.push(_event("r3", source_entity="dan.wu", target_entity="bob.smith"))
         agent._process_inbox()
+        agent._process_pending_observations()
         agent._maybe_submit_next()
         # Check memory for read_chat_from
         memories = agent.memory._memories
@@ -492,6 +499,7 @@ class TestReadActionModality:
         clock.advance(0.0)
         inbox.push(_event("r4", source_entity="janet.liu", target_entity="bob.smith"))
         agent._process_inbox()
+        agent._process_pending_observations()
         agent._maybe_submit_next()
         memories = agent.memory._memories
         read_memories = [m for m in memories if m.relation == "read_mail_from"]
@@ -571,3 +579,81 @@ class TestPreferredModality:
         for p in _personas():
             if p.id in email_ids:
                 assert p.profile.backstory.preferred_modality == "email", f"{p.id} should prefer email"
+
+
+# ---------------------------------------------------------------------------
+# Observability surface per modality
+# ---------------------------------------------------------------------------
+
+
+class TestObservabilitySurface:
+    """The runtime should emit events on svc-chat for chat and svc-email for email."""
+
+    def test_chat_action_emits_on_svc_chat(self):
+        from open_range.runtime_events import green_events_for_action
+        from open_range.runtime_types import Action
+
+        action = Action(
+            actor_id="dan.wu", role="green", kind="mail",
+            payload={
+                "branch": "npc_chat", "recipient": "bob.smith",
+                "modality": "chat", "service": "svc-chat",
+            },
+        )
+        events: list = []
+
+        def fake_emit(**kw):
+            events.append(kw)
+            return None  # unused by caller in this test
+
+        green_events_for_action(
+            action, live_recovery_applied=False, target="svc-chat",
+            emit_event=fake_emit, service_surfaces=lambda t: (t,),
+        )
+        assert len(events) == 1
+        assert events[0]["observability_surfaces"] == ("svc-chat",)
+
+    def test_email_action_emits_on_svc_email(self):
+        from open_range.runtime_events import green_events_for_action
+        from open_range.runtime_types import Action
+
+        action = Action(
+            actor_id="bob.smith", role="green", kind="mail",
+            payload={
+                "branch": "npc_chat", "recipient": "dan.wu",
+                "modality": "email", "service": "svc-email",
+            },
+        )
+        events: list = []
+
+        def fake_emit(**kw):
+            events.append(kw)
+            return None
+
+        green_events_for_action(
+            action, live_recovery_applied=False, target="svc-email",
+            emit_event=fake_emit, service_surfaces=lambda t: (t,),
+        )
+        assert len(events) == 1
+        assert events[0]["observability_surfaces"] == ("svc-email",)
+
+    def test_no_modality_defaults_to_svc_email(self):
+        from open_range.runtime_events import green_events_for_action
+        from open_range.runtime_types import Action
+
+        action = Action(
+            actor_id="bob.smith", role="green", kind="mail",
+            payload={"branch": "npc_chat", "recipient": "dan.wu"},
+        )
+        events: list = []
+
+        def fake_emit(**kw):
+            events.append(kw)
+            return None
+
+        green_events_for_action(
+            action, live_recovery_applied=False, target="svc-email",
+            emit_event=fake_emit, service_surfaces=lambda t: (t,),
+        )
+        assert len(events) == 1
+        assert events[0]["observability_surfaces"] == ("svc-email",)

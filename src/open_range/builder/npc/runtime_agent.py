@@ -5,14 +5,17 @@ agent observes events via an EventInbox, processes tasks from a daily
 task list, and submits Actions to an ActionOutbox.  The runtime drains
 the outbox and turns actions into RuntimeEvents visible to red/blue.
 
-**Pre-generated script with dynamic deviation:**
+**Observation-driven behavior:**
 
-In the absence of external stimuli the agent replays its pre-generated
-task list deterministically (zero LLM calls, identical output every
-run).  When an event requires a response — a phishing email, a SIEM
-alert, an important message from a colleague — the agent deviates
-from the script and queues a reactive action that takes priority over
-the next scheduled task.
+Incoming events are recorded as *observations* in the agent's memory.
+High-severity security events trigger an immediate reaction (fast path),
+while messages and lower-priority alerts accumulate in a pending list.
+The agent periodically decides whether to act on pending observations
+based on personality traits (mood, work_ethic, chattiness, etc.),
+current task focus, and how long the observations have been waiting.
+
+Focused, diligent NPCs batch-check messages between tasks.  Distracted
+or chatty NPCs interrupt their current work more frequently.
 
 **LLM integration:**
 
@@ -23,8 +26,9 @@ When ``model`` is set, the agent uses LLM calls for:
 All LLM calls fall back to templates on failure.
 
 Priority order:
-  1. Reactions (respond to stimuli — phishing, alerts, important mail)
-  2. Pre-generated task (from the daily task list)
+  1. Security reactions (fast path — immediate response)
+  2. Pending observations (personality-gated check)
+  3. Pre-generated task (from the daily task list)
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ import logging
 import os
 import random
 from collections import deque
+from dataclasses import dataclass
 from typing import Any
 
 from open_range.builder.npc.email_templates import generate_reply_content
@@ -67,6 +72,35 @@ _REACTION_EVENT_TYPES = {
     "DetectionAlertRaised", "ServiceDegraded",
 }
 _HIGH_SEVERITY = {"CredentialObtained", "UnauthorizedCredentialUse", "InitialAccess"}
+
+
+@dataclass(frozen=True)
+class Observation:
+    """A recorded observation that the NPC may act on later.
+
+    Security observations go straight to the reaction queue (fast path).
+    Messages and alerts accumulate in ``_pending_observations`` and are
+    processed when the NPC's personality and focus state allow it.
+    """
+
+    event: RuntimeEvent
+    timestamp: float   # sim_clock.now when observed
+    importance: float  # 1-10, same scale as MemoryEntry
+    category: str      # "security" | "alert" | "message" | "routine"
+
+
+# Personality trait → check-propensity weights
+_MOOD_WEIGHTS: dict[str, float] = {
+    "distracted": 0.30, "anxious": 0.20, "bored": 0.15,
+    "relaxed": 0.05, "focused": -0.10,
+}
+_WORK_ETHIC_WEIGHTS: dict[str, float] = {
+    "lazy": 0.20, "average": 0.0, "diligent": -0.15,
+}
+_STYLE_WEIGHTS: dict[str, float] = {
+    "verbose": 0.10, "terse": -0.05,
+}
+_CHECK_PROPENSITY_BASE = 0.3
 
 # ---------------------------------------------------------------------------
 # LLM prompts
@@ -189,6 +223,11 @@ class RuntimeNPCAgent:
         self._reaction_queue: deque[Action] = deque()
         self._reacted_event_ids: set[str] = set()
         self._read_from: set[str] = set()
+        self._pending_observations: list[Observation] = []
+        self._between_tasks: bool = False
+        self._is_security_role: bool = persona.department.lower() in (
+            "security", "infosec", "soc",
+        )
 
     @property
     def _use_llm(self) -> bool:
@@ -196,7 +235,11 @@ class RuntimeNPCAgent:
 
     @property
     def done(self) -> bool:
-        return self._task_idx >= len(self.tasks) and not self._reaction_queue
+        return (
+            self._task_idx >= len(self.tasks)
+            and not self._reaction_queue
+            and not self._pending_observations
+        )
 
     async def run(self) -> None:
         """Main agent loop — async, uses LLM when model is set."""
@@ -259,6 +302,16 @@ class RuntimeNPCAgent:
         return p.personality.mood if p else "focused"
 
     @property
+    def _work_ethic(self) -> str:
+        p = self.persona.profile
+        return p.personality.work_ethic if p else "diligent"
+
+    @property
+    def _interpersonal_style(self) -> str:
+        p = self.persona.profile
+        return p.personality.interpersonal_style if p else "casual"
+
+    @property
     def _friends(self) -> tuple[str, ...]:
         p = self.persona.profile
         return p.backstory.friends if p else ()
@@ -277,17 +330,74 @@ class RuntimeNPCAgent:
         return ""
 
     # ------------------------------------------------------------------
-    # Inbox processing (sync for script, async for run loop)
+    # Observation system
     # ------------------------------------------------------------------
 
-    def _process_inbox(self) -> None:
-        """Sync version — template reactions only (for script use)."""
-        for event in self.inbox.poll():
-            self._observe(event)
-            if self._needs_reaction(event):
-                reaction = self._build_reaction(event)
+    def _create_observation(self, event: RuntimeEvent) -> Observation | None:
+        """Categorize an event into an Observation, or None if not actionable.
+
+        Events are pre-filtered by green.py routing — only events relevant
+        to this NPC reach the inbox.  Detection alerts only arrive for
+        security personas; ServiceDegraded only for personas who use the
+        affected service; undetected malicious events reach nobody.
+        """
+        # Skip own events
+        if event.actor == "green" and event.source_entity == self.persona.id:
+            return None
+        # Detection/security alerts (only security personas receive these)
+        if event.event_type in ("DetectionAlertRaised", "SuspiciousActionObserved"):
+            return Observation(event, self.clock.now, 8.0, "security")
+        # Service degradation (routed to affected users only)
+        if event.event_type == "ServiceDegraded":
+            return Observation(event, self.clock.now, 4.0, "alert")
+        # Direct message from another NPC
+        if (
+            event.event_type == "BenignUserAction"
+            and event.target_entity == self.persona.id
+            and event.source_entity != self.persona.id
+            and event.source_entity not in self._read_from
+        ):
+            return Observation(event, self.clock.now, 3.5, "message")
+        return None
+
+    def _check_propensity(self) -> float:
+        """How likely this NPC is to check pending observations right now.
+
+        Combines personality traits into a 0.0-1.0 propensity score.
+        Higher values mean the NPC checks more frequently (distractible).
+        """
+        score = _CHECK_PROPENSITY_BASE
+        score += _MOOD_WEIGHTS.get(self._mood, 0.0)
+        score += _WORK_ETHIC_WEIGHTS.get(self._work_ethic, 0.0)
+        score += _STYLE_WEIGHTS.get(self._interpersonal_style, 0.0)
+        score += 0.20 * self._chattiness
+        return max(0.05, min(0.95, score))
+
+    def _should_check_observations(self) -> bool:
+        """Decide whether to process pending observations this tick."""
+        if not self._pending_observations:
+            return False
+        # Between tasks: always check (batch-check behavior)
+        if self._between_tasks:
+            return True
+        propensity = self._check_propensity()
+        # Age boost: older observations become harder to ignore
+        oldest = min(obs.timestamp for obs in self._pending_observations)
+        age_minutes = max(0.0, self.clock.now - oldest)
+        age_boost = min(0.3, age_minutes / 60.0)
+        return self._rng.random() < (propensity + age_boost)
+
+    def _process_pending_observations(self) -> None:
+        """Move actionable pending observations into the reaction queue (sync)."""
+        self._between_tasks = False
+        remaining: list[Observation] = []
+        for obs in self._pending_observations:
+            if obs.event.id in self._reacted_event_ids:
+                continue
+            if obs.category in ("message", "alert"):
+                reaction = self._build_reaction(obs.event)
                 self._reaction_queue.append(reaction)
-                self._reacted_event_ids.add(event.id)
+                self._reacted_event_ids.add(obs.event.id)
                 if reaction.payload.get("routine") == "read_mail":
                     subject = reaction.payload.get("email_subject", "")
                     sender_id = reaction.payload.get("recipient", "")
@@ -296,18 +406,24 @@ class RuntimeNPCAgent:
                         reply = self._reply_action(sender_id, modality=reply_modality)
                         if reply is not None:
                             self._reaction_queue.append(reply)
+            else:
+                remaining.append(obs)
+        self._pending_observations = remaining
 
-    async def _process_inbox_async(self) -> None:
-        """Async version — uses LLM for reactions when model is set."""
-        for event in self.inbox.poll():
-            self._observe(event)
-            if self._needs_reaction(event):
-                if self._use_llm and event.malicious:
-                    reaction = await self._llm_decide_reaction(event)
+    async def _process_pending_observations_async(self) -> None:
+        """Move actionable pending observations into the reaction queue (async)."""
+        self._between_tasks = False
+        remaining: list[Observation] = []
+        for obs in self._pending_observations:
+            if obs.event.id in self._reacted_event_ids:
+                continue
+            if obs.category in ("message", "alert"):
+                if self._use_llm and obs.event.malicious:
+                    reaction = await self._llm_decide_reaction(obs.event)
                 else:
-                    reaction = self._build_reaction(event)
+                    reaction = self._build_reaction(obs.event)
                 self._reaction_queue.append(reaction)
-                self._reacted_event_ids.add(event.id)
+                self._reacted_event_ids.add(obs.event.id)
                 if reaction.payload.get("routine") == "read_mail":
                     subject = reaction.payload.get("email_subject", "")
                     sender_id = reaction.payload.get("recipient", "")
@@ -316,6 +432,46 @@ class RuntimeNPCAgent:
                         reply = await self._reply_action_async(sender_id, modality=reply_modality)
                         if reply is not None:
                             self._reaction_queue.append(reply)
+            else:
+                remaining.append(obs)
+        self._pending_observations = remaining
+
+    # ------------------------------------------------------------------
+    # Inbox processing (sync for script, async for run loop)
+    # ------------------------------------------------------------------
+
+    def _process_inbox(self) -> None:
+        """Sync version — security fast path + deferred observations."""
+        for event in self.inbox.poll():
+            self._observe(event)
+            obs = self._create_observation(event)
+            if obs is None or event.id in self._reacted_event_ids:
+                continue
+            if obs.category == "security":
+                # Fast path: high-severity security events react immediately
+                reaction = self._build_reaction(event)
+                self._reaction_queue.append(reaction)
+                self._reacted_event_ids.add(event.id)
+            else:
+                # Deferred path: messages and alerts wait for personality check
+                self._pending_observations.append(obs)
+
+    async def _process_inbox_async(self) -> None:
+        """Async version — security fast path + deferred observations."""
+        for event in self.inbox.poll():
+            self._observe(event)
+            obs = self._create_observation(event)
+            if obs is None or event.id in self._reacted_event_ids:
+                continue
+            if obs.category == "security":
+                if self._use_llm and event.malicious:
+                    reaction = await self._llm_decide_reaction(event)
+                else:
+                    reaction = self._build_reaction(event)
+                self._reaction_queue.append(reaction)
+                self._reacted_event_ids.add(event.id)
+            else:
+                self._pending_observations.append(obs)
 
     def _observe(self, event: RuntimeEvent) -> None:
         if event.actor == "green" and event.source_entity == self.persona.id:
@@ -358,11 +514,17 @@ class RuntimeNPCAgent:
     # ------------------------------------------------------------------
 
     def _build_reaction(self, event: RuntimeEvent) -> Action:
-        if event.malicious or event.event_type == "DetectionAlertRaised":
+        # Security alerts (only security personas receive these via routing)
+        if event.event_type in ("DetectionAlertRaised", "SuspiciousActionObserved"):
             if self.persona.awareness > 0.5:
                 return self._report_action(event)
-            else:
+            return self._investigate_action(event)
+        # Service degradation
+        if event.event_type == "ServiceDegraded":
+            if self._is_security_role:
                 return self._investigate_action(event)
+            return self._service_issue_action(event)
+        # Direct message from another NPC
         if (
             event.event_type == "BenignUserAction"
             and event.target_entity == self.persona.id
@@ -399,6 +561,47 @@ class RuntimeNPCAgent:
             actor_id=self.persona.id, role="green", kind="api",
             payload={
                 "routine": "browse_app", "service": "svc-siem",
+                "host": self.persona.home_host, "mailbox": self.persona.mailbox,
+            },
+        )
+
+    def _service_issue_action(self, event: RuntimeEvent) -> Action:
+        """Non-security NPC reacts to a service degradation.
+
+        Chatty NPCs message a colleague ("is X down for you?").
+        Others contact helpdesk.  If the degraded service is the
+        communication channel itself, fall back to the other channel.
+        """
+        affected_service = event.target_entity
+        self.memory.add(
+            subject=self.persona.id, relation="noticed_service_outage",
+            object_=affected_service, importance=4.0,
+            tags=["reactive", "service_issue", event.event_type.lower()],
+        )
+        # Pick communication channel — avoid the one that's down
+        if affected_service in ("svc-email", "svc-chat"):
+            channel = "svc-chat" if affected_service == "svc-email" else "svc-email"
+        else:
+            channel = _modality_service(self._preferred_modality)
+        # Chatty NPCs message a colleague; others contact helpdesk
+        if self._chattiness > 0.5 and self.colleagues:
+            colleague = self._rng.choice(self.colleagues)
+            return Action(
+                actor_id=self.persona.id, role="green", kind="mail",
+                payload={
+                    "routine": "send_mail", "service": channel,
+                    "host": self.persona.home_host, "mailbox": self.persona.mailbox,
+                    "branch": "npc_chat", "recipient": colleague.id,
+                    "to": colleague.mailbox,
+                    "modality": "chat" if channel == "svc-chat" else "email",
+                    "email_subject": "" if channel == "svc-chat" else f"{affected_service} down?",
+                    "email_body": f"Hey, is {affected_service} working for you? I can't access it.",
+                },
+            )
+        return Action(
+            actor_id=self.persona.id, role="green", kind="api",
+            payload={
+                "routine": "contact_helpdesk", "service": affected_service,
                 "host": self.persona.home_host, "mailbox": self.persona.mailbox,
             },
         )
@@ -521,23 +724,42 @@ class RuntimeNPCAgent:
 
     def _maybe_submit_next(self) -> None:
         """Sync version — template content only (for script use)."""
+        # Priority 1: security reactions (fast path)
         if self._reaction_queue:
             action = self._reaction_queue.popleft()
             self._submit(action)
             return
+        # Priority 2: personality-gated observation processing
+        if self._should_check_observations():
+            self._process_pending_observations()
+            if self._reaction_queue:
+                action = self._reaction_queue.popleft()
+                self._submit(action)
+                return
+        # Priority 3: next scheduled task
         task = self._next_due_task()
         if task is None:
             return
         action = self._build_action(task)
         self._submit(action)
         self._record_task_memory(task)
+        self._between_tasks = True
 
     async def _maybe_submit_next_async(self) -> None:
         """Async version — uses LLM for email content when model is set."""
+        # Priority 1: security reactions (fast path)
         if self._reaction_queue:
             action = self._reaction_queue.popleft()
             self._submit(action)
             return
+        # Priority 2: personality-gated observation processing
+        if self._should_check_observations():
+            await self._process_pending_observations_async()
+            if self._reaction_queue:
+                action = self._reaction_queue.popleft()
+                self._submit(action)
+                return
+        # Priority 3: next scheduled task
         task = self._next_due_task()
         if task is None:
             return
@@ -547,6 +769,7 @@ class RuntimeNPCAgent:
             action = self._build_action(task)
         self._submit(action)
         self._record_task_memory(task)
+        self._between_tasks = True
 
     def _next_due_task(self) -> NPCTask | None:
         """Advance past idle tasks and return the next actionable task.

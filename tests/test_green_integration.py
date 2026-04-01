@@ -39,11 +39,12 @@ def _make_persona(
     awareness: float = 0.5,
     susceptibility: dict | None = None,
     routine: tuple = ("browse_app", "send_mail", "browse_app", "browse_app"),
+    department: str = "Marketing",
 ) -> GreenPersona:
     return GreenPersona(
         id=id_,
         role=role,
-        department="Marketing",
+        department=department,
         home_host="siem",
         mailbox=f"{id_}@corp.local",
         awareness=awareness,
@@ -58,6 +59,7 @@ def _make_snapshot(personas: list[GreenPersona] | None = None) -> Any:
         personas = [
             _make_persona("janet.liu", awareness=0.4),
             _make_persona("bob.smith", role="IT Administrator", awareness=0.8),
+            _make_persona("riley.kim", role="SOC Analyst", awareness=0.9, department="Security"),
         ]
 
     class _World:
@@ -152,8 +154,8 @@ class TestRecordEventMemory:
         event = _make_event("InitialAccess", source_entity="attacker", target_entity="svc-web")
         sched.record_event(event)
 
-        # Observer is the highest-awareness persona (bob.smith, 0.8)
-        ms = sched._memory_streams["bob.smith"]
+        # Observer is the highest-awareness security persona (riley.kim, 0.9)
+        ms = sched._memory_streams["riley.kim"]
         assert len(ms) == 1
         entry = ms._memories[0]
         assert entry.subject == "attacker"
@@ -165,13 +167,13 @@ class TestRecordEventMemory:
     def test_high_severity_event_gets_high_importance(self):
         sched = _make_scheduler()
         sched.record_event(_make_event("CredentialObtained"))
-        ms = sched._memory_streams["bob.smith"]
+        ms = sched._memory_streams["riley.kim"]
         assert ms._memories[0].importance == 8.0
 
     def test_low_severity_event_gets_medium_importance(self):
         sched = _make_scheduler()
         sched.record_event(_make_event("CrossZoneTraversal"))
-        ms = sched._memory_streams["bob.smith"]
+        ms = sched._memory_streams["riley.kim"]
         assert ms._memories[0].importance == 5.0
 
     def test_benign_event_not_recorded(self):
@@ -513,16 +515,47 @@ class TestActionOutboxBridge:
 class TestEventInboxBridge:
     """Events pushed by record_event() reach per-NPC inboxes."""
 
-    def test_malicious_event_reaches_all_inboxes(self):
+    def test_malicious_event_invisible_to_all(self):
+        """Undetected malicious events reach nobody."""
         sched = _make_scheduler()
         event = _make_event("InitialAccess")
         sched.record_event(event)
 
+        for pid in sched._event_inboxes:
+            assert len(sched._event_inboxes[pid].poll()) == 0
+
+    def test_detection_alert_reaches_security_only(self):
+        """DetectionAlertRaised reaches only security personas."""
+        sched = _make_scheduler()
+        event = _make_event("DetectionAlertRaised", malicious=False,
+                            target_entity="svc-web")
+        sched.record_event(event)
+
+        # Security persona sees it
+        riley_events = sched._event_inboxes["riley.kim"].poll()
+        assert len(riley_events) == 1
+        assert riley_events[0].id == event.id
+
+        # Non-security personas don't
         for pid in ("janet.liu", "bob.smith"):
-            inbox = sched._event_inboxes[pid]
-            events = inbox.poll()
-            assert len(events) == 1
-            assert events[0].id == event.id
+            assert len(sched._event_inboxes[pid].poll()) == 0
+
+    def test_service_degraded_reaches_affected_users(self):
+        """ServiceDegraded routes to personas whose tasks use that service."""
+        sched = _make_scheduler()
+        event = _make_event("ServiceDegraded", malicious=False,
+                            target_entity="svc-web")
+        sched.record_event(event)
+
+        # All personas with browse_app in their routine use svc-web
+        for pid in sched._event_inboxes:
+            events = sched._event_inboxes[pid].poll()
+            persona = next(p for p in sched._snapshot.world.green_personas if p.id == pid)
+            uses_web = any(r in ("browse_app", "browse", "login", "lookup")
+                          for r in persona.routine)
+            if uses_web:
+                assert len(events) >= 1, f"{pid} should see svc-web degradation"
+            # (personas without web tasks may still get it if their routine includes browse)
 
     def test_benign_event_targeting_persona_reaches_only_that_inbox(self):
         """A benign event targeting a specific NPC only reaches that NPC."""
@@ -550,7 +583,8 @@ class TestEventInboxBridge:
         sched = _make_scheduler()
         assert "janet.liu" in sched._event_inboxes
         assert "bob.smith" in sched._event_inboxes
-        assert len(sched._event_inboxes) == 2
+        assert "riley.kim" in sched._event_inboxes
+        assert len(sched._event_inboxes) == 3
 
 
 class TestSimClockBridge:

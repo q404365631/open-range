@@ -276,51 +276,55 @@ class TestRuntimeNPCAgent:
 class TestDynamicReactions:
     """NPCs deviate from their pre-generated script when stimuli arrive."""
 
-    def test_malicious_event_triggers_report(self):
-        """High-awareness NPC receiving a malicious event -> report action."""
+    def test_detection_alert_triggers_report(self):
+        """Security persona receiving a detection alert -> report action."""
         personas = _personas()
-        bob = next(p for p in personas if p.id == "bob.smith")
+        riley = next(p for p in personas if p.id == "riley.kim")
         agent, outbox, inbox, clock = _make_agent(
-            persona=bob, tasks=[NPCTask("Browse", "browse", "/", "", 100, 15)],
+            persona=riley, tasks=[NPCTask("Browse", "browse", "/", "", 100, 15)],
         )
         clock.advance(0.0)
 
-        inbox.push(_event("atk-1", malicious=True, event_type="InitialAccess"))
+        inbox.push(_event("atk-1", event_type="DetectionAlertRaised",
+                          source_entity="svc-siem", target_entity="svc-web"))
         agent._process_inbox()
         agent._maybe_submit_next()
 
         actions = outbox.drain()
         assert len(actions) == 1
         a = actions[0]
-        assert a.actor_id == "bob.smith"
+        assert a.actor_id == "riley.kim"
         assert a.payload.get("branch") == "report_suspicious_activity"
-        assert a.payload.get("reported_event_type") == "InitialAccess"
 
-    def test_low_awareness_npc_investigates(self):
-        """Low-awareness NPC receiving a malicious event -> investigate."""
+    def test_non_security_service_degraded_contacts_helpdesk(self):
+        """Non-security NPC receiving ServiceDegraded -> helpdesk or colleague."""
         personas = _personas()
         dan = next(p for p in personas if p.id == "dan.wu")
         agent, outbox, inbox, clock = _make_agent(
             persona=dan, tasks=[NPCTask("Browse", "browse", "/", "", 100, 15)],
         )
         clock.advance(0.0)
-        inbox.push(_event("atk-2", malicious=True, event_type="CredentialObtained"))
+        inbox.push(_event("sd-1", event_type="ServiceDegraded",
+                          target_entity="svc-web"))
         agent._process_inbox()
+        agent._process_pending_observations()
         agent._maybe_submit_next()
 
         actions = outbox.drain()
         assert len(actions) == 1
-        assert actions[0].payload.get("service") == "svc-siem"
+        # Dan is chatty (0.8) so he messages a colleague
+        assert actions[0].payload.get("routine") in ("send_mail", "contact_helpdesk")
 
     def test_reaction_overrides_next_scheduled_task(self):
         """A reaction takes priority over the next pre-generated task."""
         personas = _personas()
-        bob = next(p for p in personas if p.id == "bob.smith")
+        riley = next(p for p in personas if p.id == "riley.kim")
         task = NPCTask("Browse portal", "browse", "/", "", 0, 15)
-        agent, outbox, inbox, clock = _make_agent(persona=bob, tasks=[task])
+        agent, outbox, inbox, clock = _make_agent(persona=riley, tasks=[task])
         clock.advance(0.0)
 
-        inbox.push(_event("atk-3", malicious=True, event_type="InitialAccess"))
+        inbox.push(_event("atk-3", event_type="DetectionAlertRaised",
+                          source_entity="svc-siem", target_entity="svc-web"))
         agent._process_inbox()
         agent._maybe_submit_next()  # reaction first
 
@@ -335,7 +339,7 @@ class TestDynamicReactions:
         assert actions2[0].payload.get("routine") == "browse"
 
     def test_incoming_mail_triggers_read_reaction(self):
-        """NPC receives mail from a colleague -> reads it as a reaction."""
+        """NPC receives mail from a colleague -> observation -> read reaction."""
         personas = _personas()
         bob = next(p for p in personas if p.id == "bob.smith")
         agent, outbox, inbox, clock = _make_agent(
@@ -352,6 +356,9 @@ class TestDynamicReactions:
         )
         inbox.push(mail_event)
         agent._process_inbox()
+        assert len(agent._pending_observations) == 1
+        # Simulate the NPC deciding to check observations
+        agent._process_pending_observations()
         agent._maybe_submit_next()
 
         actions = outbox.drain()
@@ -384,6 +391,8 @@ class TestDynamicReactions:
         )
         inbox.push(mail_event)
         agent._process_inbox()
+        # Message is deferred; process observations to trigger read + reply
+        agent._process_pending_observations()
 
         # First action: read mail (with original content from MailStore)
         agent._maybe_submit_next()
@@ -411,21 +420,23 @@ class TestDynamicReactions:
         assert janet_mail["subject"].startswith("Re:")
 
     def test_detection_alert_triggers_reaction(self):
-        """A DetectionAlertRaised event triggers a reaction."""
+        """A DetectionAlertRaised event triggers immediate reaction for security persona."""
         personas = _personas()
-        bob = next(p for p in personas if p.id == "bob.smith")
-        agent, outbox, inbox, clock = _make_agent(persona=bob, tasks=[])
+        riley = next(p for p in personas if p.id == "riley.kim")
+        agent, outbox, inbox, clock = _make_agent(persona=riley, tasks=[])
         clock.advance(0.0)
 
         alert = _event(
             "alert-1", malicious=False,
             event_type="DetectionAlertRaised",
             actor="green",
-            source_entity="carol.jones",
+            source_entity="svc-siem",
             target_entity="svc-web",
         )
         inbox.push(alert)
         agent._process_inbox()
+        # Detection alerts are fast-path for security personas
+        assert len(agent._pending_observations) == 0
         agent._maybe_submit_next()
 
         actions = outbox.drain()
@@ -455,11 +466,12 @@ class TestDynamicReactions:
     def test_no_duplicate_reaction_for_same_event(self):
         """The agent doesn't react to the same event twice."""
         personas = _personas()
-        bob = next(p for p in personas if p.id == "bob.smith")
-        agent, outbox, inbox, clock = _make_agent(persona=bob, tasks=[])
+        riley = next(p for p in personas if p.id == "riley.kim")
+        agent, outbox, inbox, clock = _make_agent(persona=riley, tasks=[])
         clock.advance(0.0)
 
-        evt = _event("dup-1", malicious=True, event_type="InitialAccess")
+        evt = _event("dup-1", event_type="DetectionAlertRaised",
+                      source_entity="svc-siem", target_entity="svc-web")
         inbox.push(evt)
         agent._process_inbox()
         agent._maybe_submit_next()
@@ -473,11 +485,12 @@ class TestDynamicReactions:
     def test_reaction_recorded_in_memory(self):
         """Reactive actions are stored in the agent's memory."""
         personas = _personas()
-        bob = next(p for p in personas if p.id == "bob.smith")
-        agent, outbox, inbox, clock = _make_agent(persona=bob, tasks=[])
+        riley = next(p for p in personas if p.id == "riley.kim")
+        agent, outbox, inbox, clock = _make_agent(persona=riley, tasks=[])
         clock.advance(0.0)
 
-        inbox.push(_event("mem-1", malicious=True, event_type="InitialAccess"))
+        inbox.push(_event("mem-1", event_type="DetectionAlertRaised",
+                          source_entity="svc-siem", target_entity="svc-web"))
         agent._process_inbox()
         agent._maybe_submit_next()
 
@@ -509,22 +522,24 @@ class TestDynamicReactions:
         assert run1 == ["browse", "query_db"]
 
     def test_multiple_stimuli_queued_in_order(self):
-        """Multiple stimuli produce reactions in the order received."""
+        """Multiple detection alerts produce reactions in the order received."""
         personas = _personas()
-        bob = next(p for p in personas if p.id == "bob.smith")
-        agent, outbox, inbox, clock = _make_agent(persona=bob, tasks=[])
+        riley = next(p for p in personas if p.id == "riley.kim")
+        agent, outbox, inbox, clock = _make_agent(persona=riley, tasks=[])
         clock.advance(0.0)
 
-        inbox.push(_event("m1", malicious=True, event_type="InitialAccess"))
-        inbox.push(_event("m2", malicious=True, event_type="CredentialObtained"))
+        inbox.push(_event("m1", event_type="DetectionAlertRaised",
+                          source_entity="svc-siem", target_entity="svc-web"))
+        inbox.push(_event("m2", event_type="DetectionAlertRaised",
+                          source_entity="svc-siem", target_entity="svc-db"))
         agent._process_inbox()
 
         agent._maybe_submit_next()
         agent._maybe_submit_next()
         actions = outbox.drain()
         assert len(actions) == 2
-        assert actions[0].payload["reported_event_type"] == "InitialAccess"
-        assert actions[1].payload["reported_event_type"] == "CredentialObtained"
+        assert actions[0].payload["reported_target"] == "svc-web"
+        assert actions[1].payload["reported_target"] == "svc-db"
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +647,8 @@ class TestLLMIntegration:
         async def _go():
             with patch.dict("sys.modules", {"litellm": mock_llm}):
                 await agent._process_inbox_async()
+                # Message is deferred; process observations to trigger read + reply
+                await agent._process_pending_observations_async()
                 await agent._maybe_submit_next_async()  # read
                 await agent._maybe_submit_next_async()  # reply
 
@@ -643,17 +660,18 @@ class TestLLMIntegration:
         assert "margins" in reply.payload["email_body"]
 
     def test_llm_security_reaction(self):
-        """When model is set, security events use LLM for decisions."""
+        """When model is set, detection alerts use LLM for decisions."""
         from unittest.mock import patch
 
         personas = _personas()
-        bob = next(p for p in personas if p.id == "bob.smith")
-        agent, outbox, inbox, clock, _ = self._make_llm_agent(persona=bob)
+        riley = next(p for p in personas if p.id == "riley.kim")
+        agent, outbox, inbox, clock, _ = self._make_llm_agent(persona=riley)
         clock.advance(0.0)
         mock_llm = self._mock_litellm(
-            '{"action": "report_to_IT", "reason": "Credential theft attempt."}'
+            '{"action": "report_to_IT", "reason": "Suspicious activity detected."}'
         )
-        inbox.push(_event("sec1", malicious=True, event_type="CredentialObtained"))
+        inbox.push(_event("sec1", event_type="DetectionAlertRaised",
+                          source_entity="svc-siem", target_entity="svc-web"))
 
         async def _go():
             with patch.dict("sys.modules", {"litellm": mock_llm}):

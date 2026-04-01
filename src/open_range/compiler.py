@@ -105,6 +105,7 @@ class EnterpriseSaaSManifestCompiler:
         "engineer": "svc-web",
         "finance": "svc-fileshare",
         "it_admin": "svc-idp",
+        "security": "svc-siem",
     }
 
     def compile(
@@ -598,4 +599,6 @@ class EnterpriseSaaSManifestCompiler:
             return ("check_mail", "open_payroll_dashboard", "access_fileshare")
         if role == "it_admin":
             return ("review_idp", "triage_alerts", "reset_password")
+        if role == "security":
+            return ("triage_alerts", "browse_app", "query_db")
         return ("check_mail", "browse_app", "access_fileshare")
