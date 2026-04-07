@@ -88,10 +88,24 @@ def cli(verbose: bool) -> None:
     type=click.Path(),
     help="Output directory for rendered candidate artifacts.",
 )
-def build_cmd(manifest: str, output: str) -> None:
+@click.option(
+    "--security-tier",
+    default=1,
+    show_default=True,
+    type=click.IntRange(1, 5),
+    help="Optional security integration tier. Tier 1 keeps the core surface only.",
+)
+def build_cmd(manifest: str, output: str, security_tier: int) -> None:
     """Compile and render a candidate world from a manifest."""
     output_dir = Path(output)
-    candidate = BuildPipeline().build(_load_manifest(manifest), output_dir)
+    candidate = BuildPipeline().build(
+        _load_manifest(manifest),
+        output_dir,
+        BuildConfig(
+            security_integration_enabled=security_tier > 1,
+            security_tier=security_tier,
+        ),
+    )
     world_path = _write_json(
         candidate.world.model_dump(mode="json"), output_dir / "candidate-world.json"
     )
@@ -136,15 +150,31 @@ def build_cmd(manifest: str, output: str) -> None:
     type=click.Choice(["full", "no_necessity", "graph_plus_live", "graph_only"]),
     help="Admission strictness. Use graph_only for explicit offline admission.",
 )
+@click.option(
+    "--security-tier",
+    default=1,
+    show_default=True,
+    type=click.IntRange(1, 5),
+    help="Optional security integration tier. Tier 1 keeps the core surface only.",
+)
 def admit_cmd(
-    manifest: str, output: str, store_dir: str, split: str, validation_profile: str
+    manifest: str,
+    output: str,
+    store_dir: str,
+    split: str,
+    validation_profile: str,
+    security_tier: int,
 ) -> None:
     """Build and admit a snapshot into the snapshot store."""
     pipeline = BuildPipeline(store=FileSnapshotStore(store_dir))
     candidate = pipeline.build(
         _load_manifest(manifest),
         Path(output),
-        BuildConfig(validation_profile=validation_profile),
+        BuildConfig(
+            validation_profile=validation_profile,
+            security_integration_enabled=security_tier > 1,
+            security_tier=security_tier,
+        ),
     )
     snapshot = pipeline.admit(candidate, split=split)
     snapshot_path = Path(store_dir) / snapshot.snapshot_id / "snapshot.json"
@@ -289,6 +319,7 @@ def traces_cmd(
     click.echo(f"  Decision SFT: {report.decision_sft_path}")
     click.echo(f"  Report: {report_path}")
 
+
 @cli.command("grpo")
 @click.option(
     "--model",
@@ -387,6 +418,7 @@ def grpo_cmd(
     result = subprocess.run(command, check=False)
     if result.returncode != 0:
         raise SystemExit(result.returncode)
+
 
 if __name__ == "__main__":
     cli()

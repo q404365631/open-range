@@ -23,6 +23,9 @@ from open_range.build_config import BuildConfig, DEFAULT_BUILD_CONFIG
 from open_range.cluster import KindBackend, LiveBackend
 from open_range.counterfactuals import clear_runtime_markers, remediation_command
 from open_range.execution import PodActionBackend
+from open_range.identity_enforcement import check_identity_enforcement
+from open_range.encryption_enforcement import check_encryption_enforcement
+from open_range.mtls_enforcement import check_mtls_enforcement
 from open_range.objectives import evaluate_objective_grader_live
 from open_range.predicates import PredicateEngine
 from open_range.probe_planner import build_reference_bundle
@@ -163,6 +166,9 @@ class LocalAdmissionController:
             "path_solvability": _check_path_solvability,
             "objective_grounding": _check_objective_grounding,
             "topology_workflow_consistency": _check_workflow_consistency,
+            "identity_enforcement": check_identity_enforcement,
+            "encryption_enforcement": check_encryption_enforcement,
+            "mtls_enforcement": check_mtls_enforcement,
             "render_outputs": _check_render_outputs,
             "service_health": _check_service_health_contract,
             "siem_ingest": _check_siem_ingest,

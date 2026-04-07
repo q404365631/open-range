@@ -1,4 +1,4 @@
-"""Wire security training modules into the v1 build pipeline.
+"""Wire optional security training modules into the standalone build pipeline.
 
 The ``SecurityIntegrator`` orchestrates the four training-layer modules
 (Identity Provider, Envelope Encryption, mTLS Simulation, NPC Credential
@@ -12,8 +12,8 @@ Tier mapping (configurable):
 - **Tier 3+**: Full stack -- identity + encryption + mTLS + NPC credential
   lifecycle with authorization policies.
 
-The integrator runs as a post-render enrichment step.  It reads the
-``WorldIR``, generates security artefacts, and writes them as JSON
+The integrator runs as a post-render enrichment step. It reads the
+``WorldIR``, generates deterministic security artefacts, and writes them as JSON
 config files alongside the rendered Kind/Helm artifacts.
 
 Ported from k3s-istio-vault-platform's orchestration patterns:
@@ -182,7 +182,7 @@ class SecurityIntegrator:
             self.config.tier_map.get(max(self.config.tier_map), SecurityTierConfig()),
         )
 
-        # Build service→zone mapping from WorldIR
+        # Build service→zone mapping from WorldIR.
         services: dict[str, str] = {}
         host_by_id = {h.id: h for h in world.hosts}
         for svc in world.services:
@@ -192,15 +192,16 @@ class SecurityIntegrator:
         domain = "range.local"
         security_dir = render_dir / "security"
         security_dir.mkdir(parents=True, exist_ok=True)
+        rng = _security_rng(world, tier)
 
         if tier_cfg.identity_provider:
             self._integrate_identity(ctx, services, domain, security_dir)
 
         if tier_cfg.envelope_encryption:
-            self._integrate_encryption(ctx, world, security_dir)
+            self._integrate_encryption(ctx, world, security_dir, rng)
 
         if tier_cfg.mtls:
-            self._integrate_mtls(ctx, services, domain, security_dir)
+            self._integrate_mtls(ctx, services, security_dir, rng)
 
         if tier_cfg.npc_credential_lifecycle:
             self._integrate_npc_lifecycle(ctx, security_dir)
@@ -252,7 +253,7 @@ class SecurityIntegrator:
         for svc_name, zone in services.items():
             if svc_name in ("attacker",):
                 continue
-            spiffe_id = build_spiffe_id("range.local", zone, svc_name)
+            spiffe_id = build_spiffe_id(domain, zone, svc_name)
             scopes = _default_scopes_for_service(svc_name)
             identities[svc_name] = ServiceIdentity(
                 identity_uri=spiffe_id,
@@ -297,6 +298,7 @@ class SecurityIntegrator:
         ctx: SecurityContext,
         world: WorldIR,
         security_dir: Path,
+        rng,
     ) -> None:
         """Generate envelope encryption config for credential secrets."""
         try:
@@ -312,7 +314,6 @@ class SecurityIntegrator:
 
         # Encrypt a subset of credential secret_refs
         import math
-        import random as _random
 
         credentials = list(world.credentials)
         if not credentials:
@@ -321,34 +322,24 @@ class SecurityIntegrator:
         n_encrypt = max(
             1, math.ceil(len(credentials) * self.config.encryption_fraction)
         )
-        indices = _random.sample(
-            list(range(len(credentials))),
-            min(n_encrypt, len(credentials)),
+        indices = sorted(
+            rng.sample(
+                list(range(len(credentials))),
+                min(n_encrypt, len(credentials)),
+            )
         )
 
         master_key = EnvelopeCrypto.generate_master_key()
-        import base64
-
-        master_key_b64 = base64.b64encode(master_key).decode()
 
         encrypted_refs: list[str] = []
         dek_metadata: dict[str, Any] = {}
-
-        prev_env = os.environ.get("OPENRANGE_MASTER_KEY")
-        os.environ["OPENRANGE_MASTER_KEY"] = master_key_b64
-        try:
-            crypto = EnvelopeCrypto(master_key)
-            for idx in indices:
-                cred = credentials[idx]
-                aad = f"openrange:range:{cred.subject}:{cred.id}"
-                bundle = crypto.encrypt(cred.secret_ref, aad=aad)
-                encrypted_refs.append(cred.id)
-                dek_metadata[cred.id] = bundle.model_dump()
-        finally:
-            if prev_env is None:
-                os.environ.pop("OPENRANGE_MASTER_KEY", None)
-            else:
-                os.environ["OPENRANGE_MASTER_KEY"] = prev_env
+        crypto = EnvelopeCrypto(master_key)
+        for idx in indices:
+            cred = credentials[idx]
+            aad = f"openrange:range:{cred.subject}:{cred.id}"
+            bundle = crypto.encrypt(cred.secret_ref, aad=aad)
+            encrypted_refs.append(cred.id)
+            dek_metadata[cred.id] = bundle.model_dump()
 
         if encrypted_refs:
             enc_dir = security_dir / "encryption"
@@ -357,7 +348,7 @@ class SecurityIntegrator:
             enc_config = EncryptionConfig(
                 enabled=True,
                 encrypted_paths=encrypted_refs,
-                master_key_source="file",
+                master_key_source="env_var",
                 dek_storage_path="/etc/openrange/wrapped_dek.json",
             )
             ctx.encryption = enc_config.model_dump()
@@ -387,8 +378,8 @@ class SecurityIntegrator:
         self,
         ctx: SecurityContext,
         services: dict[str, str],
-        domain: str,
         security_dir: Path,
+        rng,
     ) -> None:
         """Generate TLS certificates for service-to-service mTLS."""
         try:
@@ -401,12 +392,10 @@ class SecurityIntegrator:
         if not mtls_services:
             return
 
-        import random as _random
-
         weaknesses: dict[str, list[str]] = {}
         if mtls_services and self.config.mtls_weakness_pool:
-            target_svc = _random.choice(mtls_services)
-            weakness = _random.choice(self.config.mtls_weakness_pool)
+            target_svc = rng.choice(sorted(mtls_services))
+            weakness = rng.choice(list(self.config.mtls_weakness_pool))
             weaknesses[target_svc] = [weakness]
 
         mtls_config = MTLSConfig(
@@ -492,12 +481,26 @@ class SecurityIntegrator:
 
 def _default_scopes_for_service(service_name: str) -> list[str]:
     """Return default authorization scopes for a service."""
+    canonical = service_name.removeprefix("svc-")
     scope_map: dict[str, list[str]] = {
         "web": ["data:read:patients/*", "data:read:referrals/*", "api:access:portal"],
+        "web_app": [
+            "data:read:patients/*",
+            "data:read:referrals/*",
+            "api:access:portal",
+        ],
         "db": ["data:read:*", "data:write:*"],
-        "ldap": ["auth:bind:*", "auth:search:*"],
+        "email": ["mail:send:*", "mail:read:*"],
+        "fileshare": ["file:read:general/*", "file:read:hr/*"],
+        "idp": ["auth:bind:*", "auth:search:*", "auth:admin:*"],
         "mail": ["mail:send:*", "mail:read:*"],
         "files": ["file:read:general/*", "file:read:hr/*"],
         "siem": ["log:read:*", "log:write:*", "alert:read:*"],
     }
-    return scope_map.get(service_name, [f"service:access:{service_name}"])
+    return scope_map.get(canonical, [f"service:access:{service_name}"])
+
+
+def _security_rng(world: WorldIR, tier: int):
+    import random
+
+    return random.Random(f"{world.world_id}:{world.seed}:{tier}:security")

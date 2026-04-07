@@ -25,8 +25,12 @@ import time
 import uuid
 from typing import Any
 
-import jwt
 from pydantic import BaseModel, Field
+
+try:
+    import jwt
+except ImportError:  # pragma: no cover
+    jwt = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -377,6 +381,12 @@ class CredentialLifecycleManager:
         }
         if expires_at is not None:
             payload["exp"] = int(expires_at)
+
+        if jwt is None:
+            raise RuntimeError(
+                "PyJWT is required for NPC credential lifecycle support. "
+                "Install the package with 'pip install PyJWT'."
+            )
 
         return jwt.encode(
             payload,

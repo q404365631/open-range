@@ -242,6 +242,10 @@ class TestHelpers:
         scopes = _default_scopes_for_service("web")
         assert any("patients" in s for s in scopes)
 
+    def test_default_scopes_for_service_id_alias(self):
+        scopes = _default_scopes_for_service("svc-web")
+        assert any("patients" in s for s in scopes)
+
     def test_default_scopes_for_unknown_service(self):
         scopes = _default_scopes_for_service("custom_svc")
         assert scopes == ["service:access:custom_svc"]

@@ -7,9 +7,11 @@ from types import SimpleNamespace
 from open_range._runtime_store import load_runtime_snapshot
 from open_range.cluster import ExecResult
 from open_range.admit import LocalAdmissionController
+from open_range.build_config import BuildConfig
 from open_range.code_web import code_web_payload
 from open_range.compiler import EnterpriseSaaSManifestCompiler
 from open_range.curriculum import FrontierMutationPolicy, PopulationStats
+from open_range.pipeline import BuildPipeline
 from open_range.predicates import PredicateEngine
 from open_range.render import EnterpriseSaaSKindRenderer
 from open_range.store import FileSnapshotStore
@@ -164,6 +166,33 @@ def test_admission_controller_admits_seeded_world(tmp_path: Path):
     )
     assert reference_bundle.reference_attack_traces
     assert reference_bundle.reference_defense_traces
+
+
+def test_admission_controller_registers_security_stage_when_enabled(tmp_path: Path):
+    pipeline = BuildPipeline(store=FileSnapshotStore(tmp_path / "snapshots"))
+    candidate = pipeline.build(
+        _manifest_payload(),
+        tmp_path / "rendered-security",
+        BuildConfig(
+            validation_profile="graph_only",
+            security_integration_enabled=True,
+            security_tier=3,
+        ),
+    )
+
+    _reference_bundle, report = LocalAdmissionController(mode="fail_fast").admit(
+        candidate.world,
+        candidate.artifacts,
+        candidate.build_config,
+    )
+
+    security_stage = next(stage for stage in report.stages if stage.name == "security")
+
+    assert {check.name for check in security_stage.checks} == {
+        "identity_enforcement",
+        "encryption_enforcement",
+        "mtls_enforcement",
+    }
 
 
 def test_admission_controller_offline_witness_can_ground_pinned_non_code_weakness(

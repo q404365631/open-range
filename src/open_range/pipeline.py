@@ -12,6 +12,7 @@ from open_range.build_config import BuildConfig, DEFAULT_BUILD_CONFIG
 from open_range.compiler import EnterpriseSaaSManifestCompiler
 from open_range.manifest import EnterpriseSaaSManifest, validate_manifest
 from open_range.render import EnterpriseSaaSKindRenderer
+from open_range.security_integrator import SecurityIntegrator, SecurityIntegratorConfig
 from open_range.snapshot import KindArtifacts, Snapshot
 from open_range.store import FileSnapshotStore, PoolSplit
 from open_range.synth import EnterpriseSaaSWorldSynthesizer, SynthArtifacts
@@ -38,6 +39,7 @@ class BuildPipeline:
         seeder: CatalogWeaknessSeeder | None = None,
         synthesizer: EnterpriseSaaSWorldSynthesizer | None = None,
         renderer: EnterpriseSaaSKindRenderer | None = None,
+        security_integrator: SecurityIntegrator | None = None,
         admission: LocalAdmissionController | None = None,
         store: FileSnapshotStore | None = None,
     ) -> None:
@@ -45,6 +47,7 @@ class BuildPipeline:
         self.seeder = seeder or CatalogWeaknessSeeder()
         self.synthesizer = synthesizer or EnterpriseSaaSWorldSynthesizer()
         self.renderer = renderer or EnterpriseSaaSKindRenderer()
+        self.security_integrator = security_integrator
         self.admission = admission or LocalAdmissionController(mode="fail_fast")
         self.store = store or FileSnapshotStore()
 
@@ -57,6 +60,7 @@ class BuildPipeline:
         world = self._prepare_world(source, build_config)
         synth = self.synthesizer.synthesize(world, Path(outdir) / "synth")
         artifacts = self.renderer.render(world, synth, Path(outdir))
+        artifacts = self._integrate_security(world, artifacts, build_config)
         return CandidateWorld(
             world=world, synth=synth, artifacts=artifacts, build_config=build_config
         )
@@ -106,6 +110,36 @@ class BuildPipeline:
         )
         world = self.compiler.compile(parsed, build_config)
         return self.seeder.apply(world)
+
+    def _integrate_security(
+        self,
+        world: WorldIR,
+        artifacts: KindArtifacts,
+        build_config: BuildConfig,
+    ) -> KindArtifacts:
+        if not build_config.security_integration_enabled:
+            return artifacts
+        integrator = self.security_integrator or SecurityIntegrator(
+            SecurityIntegratorConfig(enabled=True)
+        )
+        context = integrator.integrate(
+            world,
+            render_dir=Path(artifacts.render_dir),
+            tier=build_config.security_tier,
+        )
+        if not context.generated_files:
+            return artifacts
+        chart_values = dict(artifacts.chart_values)
+        chart_values["security"] = context.model_dump(mode="json")
+        return artifacts.model_copy(
+            update={
+                "rendered_files": (
+                    *artifacts.rendered_files,
+                    *tuple(context.generated_files),
+                ),
+                "chart_values": chart_values,
+            }
+        )
 
 
 def build(

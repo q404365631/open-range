@@ -22,6 +22,8 @@ class BuildConfig(BaseModel):
     observability_surfaces_enabled: tuple[str, ...] = Field(default_factory=tuple)
     phishing_surface_enabled: bool = True
     green_artifacts_enabled: bool = True
+    security_integration_enabled: bool = False
+    security_tier: int = Field(default=1, ge=1, le=5)
     topology_scale: Literal["small", "medium", "large"] = "medium"
     validation_profile: Literal[
         "full", "no_necessity", "graph_plus_live", "graph_only"
