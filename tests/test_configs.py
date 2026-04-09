@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
+import subprocess
 
 from open_range._runtime_store import hydrate_runtime_snapshot
 import pytest
@@ -96,6 +98,59 @@ def test_build_config_can_enable_security_integration(tmp_path: Path):
         path.endswith("security/security-context.json")
         for path in candidate.artifacts.rendered_files
     )
+    idp_payloads = candidate.artifacts.chart_values["services"]["svc-idp"]["payloads"]
+    db_payloads = candidate.artifacts.chart_values["services"]["svc-db"]["payloads"]
+    idp_post_start = candidate.artifacts.chart_values["services"]["svc-idp"][
+        "postStartCommand"
+    ]
+
+    assert any(
+        payload["mountPath"] == "/opt/openrange/identity_provider_server.py"
+        for payload in idp_payloads
+    )
+    assert idp_post_start == ["/bin/sh", "/opt/openrange/start_identity_provider.sh"]
+    assert any(
+        port["port"] == 8443
+        for port in candidate.artifacts.chart_values["services"]["svc-idp"]["ports"]
+    )
+    assert any(
+        payload["mountPath"] == "/etc/openrange/wrapped_dek.json"
+        for payload in db_payloads
+    )
+    assert any(payload["mountPath"] == "/etc/mtls/cert.pem" for payload in db_payloads)
+
+
+def test_security_integration_renders_idp_runtime_hooks_with_helm(tmp_path: Path):
+    if shutil.which("helm") is None:
+        pytest.skip("helm is required for chart rendering checks")
+
+    pipeline = BuildPipeline(store=FileSnapshotStore(tmp_path / "snapshots"))
+    candidate = pipeline.build(
+        _manifest_payload(),
+        tmp_path / "rendered-security-template",
+        BuildConfig(
+            validation_profile="graph_only",
+            security_integration_enabled=True,
+            security_tier=3,
+        ),
+    )
+
+    rendered = subprocess.run(
+        [
+            "helm",
+            "template",
+            "or-demo",
+            candidate.artifacts.chart_dir,
+            "--values",
+            candidate.artifacts.values_path,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    assert "containerPort: 8443" in rendered
+    assert "/opt/openrange/start_identity_provider.sh" in rendered
 
 
 def test_build_config_can_select_k3d_and_cilium_outputs(tmp_path: Path):

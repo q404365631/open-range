@@ -53,6 +53,15 @@ spec:
               value: {{ $val | quote }}
             {{- end }}
           {{- end }}
+          {{- if $svc.postStartCommand }}
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  {{- range $svc.postStartCommand }}
+                  - {{ . | quote }}
+                  {{- end }}
+          {{- end }}
           {{- if $svc.payloads }}
           volumeMounts:
             {{- range $svc.payloads }}
