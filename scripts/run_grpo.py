@@ -368,8 +368,8 @@ def online_reward_fn(completions, **kwargs):
     against the OpenEnv /reset + /step endpoints, returns cumulative reward.
     Falls back to progressive_reward_fn on connection errors.
     """
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     env_url = os.environ.get("OPENENV_URL", "http://localhost:8000")
     gts = kwargs.get("ground_truth", [])
@@ -765,7 +765,7 @@ def main():
     logger.info("Reward functions: %s", [f.__name__ for f in reward_funcs])
 
     # Train
-    from trl import GRPOTrainer, GRPOConfig
+    from trl import GRPOConfig, GRPOTrainer
 
     logger.info("Starting GRPO training...")
     trainer = GRPOTrainer(

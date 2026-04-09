@@ -65,12 +65,14 @@ OpenRange splits execution into two physical planes:
 - [NPC Profiles](docs/npc-profiles.md)
 
 
+## Getting Started
+
 ### 1. Install from Source
 
-If you want to modify OpenRange features or build complex RL tooling:
+If you want to modify OpenRange or build on top of it:
 
 ```bash
-uv sync --extra npc
+uv sync
 uv run openrange --help
 ```
 

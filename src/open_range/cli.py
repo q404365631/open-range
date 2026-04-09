@@ -328,19 +328,17 @@ def traces_cmd(
 @cli.command("grpo")
 @click.option(
     "--model",
-    default="/workspace/outputs/sft-merged",
-    show_default=True,
+    required=True,
     help="Path to the SFT checkpoint used by the Qwen-focused GRPO runner.",
 )
 @click.option(
     "--data",
-    default="/workspace/data/grpo_combined.jsonl",
-    show_default=True,
+    required=True,
     help="Path to the GRPO JSONL training data.",
 )
 @click.option(
     "--output",
-    default="/workspace/outputs/grpo",
+    default="./grpo-output",
     show_default=True,
     help="Output directory for GRPO artifacts.",
 )

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from subprocess import CompletedProcess
 
+import open_range.cluster as cluster_mod
 from open_range.async_utils import run_async
 from open_range.cluster import KindBackend, PodSet
-import open_range.cluster as cluster_mod
 
 
 class _FakeProc:
