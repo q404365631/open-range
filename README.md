@@ -55,15 +55,15 @@ OpenRange splits execution into two physical planes:
 - Generate branch-native trace datasets for training
 - Use offline admission for local iteration or live validation when running with Kind
 
-## Core Documentation
+## Documentation
 
-- [Architecture](docs/architecture.md)
-- [Training Data Spec](docs/training-data-spec.md)
-- [Benchmark Offensive Coverage](docs/benchmark-offensive-coverage.md)
-- [Effect Grounding](docs/effect-grounding.md)
-- [Weakness Lifecycle](docs/weakness-lifecycle.md)
-- [NPC Profiles](docs/npc-profiles.md)
-
+- [How an Episode Works](docs/how-an-episode-works.md): practical runtime walkthrough
+- [Architecture](docs/architecture.md): package layers and runtime boundaries
+- [Training Data Spec](docs/training-data-spec.md): canonical trace and export contract
+- [Benchmark Offensive Coverage](docs/benchmark-offensive-coverage.md): web-offensive slice and objective grounding
+- [Effect Grounding](docs/effect-grounding.md): grounded effect and mitigation semantics
+- [Weakness Lifecycle](docs/weakness-lifecycle.md): weakness realization, admission, and mutation
+- [NPC Profiles](docs/npc-profiles.md): green-user behavior shaping
 
 ## Getting Started
 
@@ -139,16 +139,6 @@ decision = env.next_decision()
 print(f"Active Snapshot: {state.snapshot_id}")
 print(f"Awaiting turn from: {decision.actor} @ time: {decision.obs.sim_time}")
 ```
-
-## Start Here
-
-- [How an Episode Works](docs/how-an-episode-works.md): practical runtime walkthrough
-- [Architecture](docs/architecture.md): package layers and runtime boundaries
-- [V1 Scope](docs/v1-paper-scope.md): product and claim boundary
-- [Training Data Spec](docs/training-data-spec.md): canonical trace/export contract
-- [Weakness Lifecycle](docs/weakness-lifecycle.md): weakness realization, admission, and mutation
-- [Benchmark Offensive Coverage](docs/benchmark-offensive-coverage.md): web-offensive slice and objective grounding
-- [Effect Grounding](docs/effect-grounding.md): grounded effect and mitigation semantics
 
 ## Scope
 
