@@ -165,10 +165,15 @@ def test_traces_command_writes_branch_native_datasets(tmp_path: Path):
 
 
 def test_grpo_command_invokes_standalone_runner(monkeypatch):
-    commands: list[list[str]] = []
+    for key in ("MODEL_ID", "OPENAI_BASE_URL", "ASR_URL", "TTS_URL"):
+        monkeypatch.delenv(key, raising=False)
 
-    def _fake_run(command: list[str], check: bool) -> subprocess.CompletedProcess[str]:
-        commands.append(command)
+    commands: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def _fake_run(
+        command: list[str], check: bool, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append((command, env))
         assert check is False
         return subprocess.CompletedProcess(command, 0)
 
@@ -201,7 +206,7 @@ def test_grpo_command_invokes_standalone_runner(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert len(commands) == 1
-    command = commands[0]
+    command, env = commands[0]
     assert command[0] == sys.executable
     assert command[1].endswith("scripts/run_grpo.py")
     assert command[2:] == [
@@ -224,3 +229,82 @@ def test_grpo_command_invokes_standalone_runner(monkeypatch):
         "--epochs",
         "2",
     ]
+    assert env is not None
+    assert "MODEL_ID" not in env
+    assert "OPENAI_BASE_URL" not in env
+    assert "ASR_URL" not in env
+    assert "TTS_URL" not in env
+
+
+def test_grpo_command_forwards_root_backend_overrides(monkeypatch):
+    for key in ("MODEL_ID", "OPENAI_BASE_URL", "ASR_URL", "TTS_URL"):
+        monkeypatch.delenv(key, raising=False)
+
+    commands: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def _fake_run(
+        command: list[str], check: bool, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append((command, env))
+        assert check is False
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(cli_module.subprocess, "run", _fake_run)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "--model",
+            "moonshotai/kimi-k2-instruct",
+            "--base-url",
+            "https://integrate.api.nvidia.com/v1/",
+            "--asr-url",
+            "http://asr.local",
+            "--tts-url",
+            "http://tts.local",
+            "grpo",
+            "--model",
+            "/tmp/model",
+            "--data",
+            "/tmp/data.jsonl",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(commands) == 1
+    command, env = commands[0]
+    assert command[0] == sys.executable
+    assert command[1].endswith("scripts/run_grpo.py")
+    assert command[2:] == [
+        "--model",
+        "/tmp/model",
+        "--data",
+        "/tmp/data.jsonl",
+        "--output",
+        "./grpo-output",
+        "--reward",
+        "online",
+        "--env-url",
+        "http://localhost:8000",
+        "--seq",
+        "4096",
+        "--comp-len",
+        "2048",
+        "--num-gen",
+        "4",
+        "--epochs",
+        "1",
+        "--backend-model",
+        "moonshotai/kimi-k2-instruct",
+        "--base-url",
+        "https://integrate.api.nvidia.com/v1/",
+        "--asr-url",
+        "http://asr.local",
+        "--tts-url",
+        "http://tts.local",
+    ]
+    assert env is not None
+    assert env["MODEL_ID"] == "moonshotai/kimi-k2-instruct"
+    assert env["OPENAI_BASE_URL"] == "https://integrate.api.nvidia.com/v1/"
+    assert env["ASR_URL"] == "http://asr.local"
+    assert env["TTS_URL"] == "http://tts.local"

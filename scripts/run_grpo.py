@@ -177,6 +177,28 @@ _EXPLOIT_BINARIES = frozenset(
     }
 )
 
+
+def apply_backend_overrides(
+    env: dict[str, str],
+    *,
+    model_id: str | None = None,
+    base_url: str | None = None,
+    asr_url: str | None = None,
+    tts_url: str | None = None,
+) -> dict[str, str]:
+    applied: dict[str, str] = {}
+    if model_id:
+        applied["MODEL_ID"] = model_id
+    if base_url:
+        applied["OPENAI_BASE_URL"] = base_url
+    if asr_url:
+        applied["ASR_URL"] = asr_url
+    if tts_url:
+        applied["TTS_URL"] = tts_url
+    env.update(applied)
+    return applied
+
+
 # OpenEnv tool definitions (activates qwen3_coder format in chat template)
 OPENENV_TOOLS = [
     {
@@ -606,8 +628,12 @@ def convert_messages(messages):
 def main():
     parser = argparse.ArgumentParser(description="Unsloth GRPO for CTF training")
     parser.add_argument("--model", default=MODEL)
+    parser.add_argument("--backend-model", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--data", default=DATA)
     parser.add_argument("--output", default=OUTPUT)
+    parser.add_argument("--base-url", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--asr-url", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--tts-url", default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--reward",
         default="online",
@@ -623,11 +649,20 @@ def main():
     parser.add_argument("--num-gen", type=int, default=NUM_GEN)
     parser.add_argument("--epochs", type=int, default=EPOCHS)
     args = parser.parse_args()
+    backend_overrides = apply_backend_overrides(
+        os.environ,
+        model_id=args.backend_model,
+        base_url=args.base_url,
+        asr_url=args.asr_url,
+        tts_url=args.tts_url,
+    )
 
     logger.info("=== Unsloth GRPO Training ===")
     logger.info("Model: %s", args.model)
     logger.info("Data: %s", args.data)
     logger.info("Reward: %s", args.reward)
+    if backend_overrides:
+        logger.info("Backend overrides: %s", ", ".join(sorted(backend_overrides)))
 
     # Check model exists
     if not Path(args.model).exists():
