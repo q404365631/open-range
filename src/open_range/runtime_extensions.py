@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class RuntimePayload(BaseModel):
     """Mountable content added to a rendered service."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
     key: str
     mount_path: str = Field(alias="mountPath")
@@ -109,6 +109,47 @@ class RenderExtensions(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
     summary_updates: dict[str, Any] = Field(default_factory=dict)
     rendered_files: tuple[str, ...] = Field(default_factory=tuple)
+
+
+def merge_render_extensions(
+    base: RenderExtensions | None,
+    extra: RenderExtensions | None,
+) -> RenderExtensions | None:
+    """Merge two render extension bundles."""
+
+    if base is None:
+        return extra
+    if extra is None:
+        return base
+
+    services: dict[str, ServiceRuntimeExtension] = {
+        service_id: ServiceRuntimeExtension.model_validate(
+            extension.model_dump(by_alias=True)
+        )
+        for service_id, extension in base.services.items()
+    }
+    for service_id, extension in extra.services.items():
+        if service_id not in services:
+            services[service_id] = ServiceRuntimeExtension.model_validate(
+                extension.model_dump(by_alias=True)
+            )
+            continue
+        merged = services[service_id]
+        merged.payloads.extend(extension.payloads)
+        merged.ports.extend(extension.ports)
+        merged.sidecars.extend(extension.sidecars)
+
+    values = dict(base.values)
+    values.update(extra.values)
+    summary_updates = dict(base.summary_updates)
+    summary_updates.update(extra.summary_updates)
+    rendered_files = tuple(dict.fromkeys((*base.rendered_files, *extra.rendered_files)))
+    return RenderExtensions(
+        services=services,
+        values=values,
+        summary_updates=summary_updates,
+        rendered_files=rendered_files,
+    )
 
 
 def apply_service_runtime_extensions(

@@ -13,7 +13,9 @@ import yaml
 from open_range.runtime_extensions import (
     RenderExtensions,
     apply_service_runtime_extensions,
+    merge_render_extensions,
 )
+from open_range.security_runtime import materialize_security_runtime
 from open_range.snapshot import KindArtifacts
 from open_range.synth import SynthArtifacts
 from open_range.world_ir import GreenPersona, ServiceSpec, WorldIR
@@ -72,12 +74,18 @@ class EnterpriseSaaSKindRenderer:
             shutil.rmtree(chart_out)
         shutil.copytree(self.chart_dir, chart_out)
 
-        values = self._build_values(world, synth, extensions=extensions)
+        combined_extensions = merge_render_extensions(
+            materialize_security_runtime(world, outdir),
+            extensions,
+        )
+        values = self._build_values(world, synth, extensions=combined_extensions)
         kind_config = self._build_kind_config(world)
         summary = self._build_summary(
             world,
             values,
-            summary_updates=extensions.summary_updates if extensions else None,
+            summary_updates=(
+                combined_extensions.summary_updates if combined_extensions else None
+            ),
         )
 
         values_path = chart_out / "values.yaml"
@@ -110,7 +118,11 @@ class EnterpriseSaaSKindRenderer:
                     str(kind_config_path),
                     str(summary_path),
                     *synth.generated_files,
-                    *(extensions.rendered_files if extensions else ()),
+                    *(
+                        combined_extensions.rendered_files
+                        if combined_extensions
+                        else ()
+                    ),
                 ]
             ),
             chart_values=values,

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from open_range.security_runtime import materialize_security_runtime
 from open_range.security_integrator import (
     DEFAULT_TIER_MAP,
     SecurityIntegrator,
@@ -104,7 +105,7 @@ class TestIntegratorDisabled:
         assert ctx.tier == 3
         assert not ctx.identity_provider
         assert not ctx.encryption
-        assert not ctx.generated_files
+        assert not ctx.service_runtime
 
     def test_noop_for_tier1(self, sample_world, render_dir):
         integrator = SecurityIntegrator(SecurityIntegratorConfig(enabled=True))
@@ -135,9 +136,11 @@ class TestIdentityIntegration:
         integrator = SecurityIntegrator(SecurityIntegratorConfig(enabled=True))
         integrator.integrate(sample_world, render_dir=render_dir, tier=2)
 
-        idp_config_path = render_dir / "security" / "idp" / "config.json"
-        assert idp_config_path.exists()
-        data = json.loads(idp_config_path.read_text())
+        data = json.loads(
+            (render_dir / "security" / "idp" / "config.json").read_text(
+                encoding="utf-8"
+            )
+        )
         assert data["enabled"] is True
 
     def test_idp_runtime_files_written(self, sample_world, render_dir):
@@ -166,7 +169,8 @@ class TestIdentityIntegration:
     ):
         integrator = SecurityIntegrator(SecurityIntegratorConfig(enabled=True))
         ctx = integrator.integrate(sample_world, render_dir=render_dir, tier=2)
-        extensions = ctx.render_extensions()
+        render_world = sample_world.model_copy(update={"security_runtime": ctx})
+        extensions = materialize_security_runtime(render_world, render_dir)
 
         assert "svc-idp" in extensions.services
         assert extensions.values["security"]["tier"] == 2
@@ -208,9 +212,11 @@ class TestEncryptionIntegration:
         )
         integrator.integrate(sample_world, render_dir=render_dir, tier=2)
 
-        dek_path = render_dir / "security" / "encryption" / "wrapped_dek.json"
-        assert dek_path.exists()
-        data = json.loads(dek_path.read_text())
+        data = json.loads(
+            (render_dir / "security" / "encryption" / "wrapped_dek.json").read_text(
+                encoding="utf-8"
+            )
+        )
         assert isinstance(data, dict)
         assert len(data) >= 1
 
@@ -230,10 +236,7 @@ class TestMTLSIntegration:
 
         assert ctx.mtls
         assert ctx.mtls["enabled"] is True
-        # Cert files should exist
-        mtls_dir = render_dir / "security" / "mtls"
-        assert mtls_dir.exists()
-        cert_files = list(mtls_dir.rglob("*.pem"))
+        cert_files = list((render_dir / "security" / "mtls").glob("*/*.pem"))
         assert len(cert_files) >= 3
 
     @pytest.mark.skipif(
@@ -306,6 +309,4 @@ class TestFullIntegration:
         assert ctx.mtls
         assert ctx.npc_credential_lifecycle
 
-        # Security context file should exist
-        ctx_path = render_dir / "security" / "security-context.json"
-        assert ctx_path.exists()
+        assert (render_dir / "security" / "security-context.json").exists()

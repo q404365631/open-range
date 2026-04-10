@@ -23,6 +23,7 @@ from open_range.runtime_extensions import (
 from open_range.store import FileSnapshotStore
 from open_range.synth import EnterpriseSaaSWorldSynthesizer
 from open_range.weaknesses import CatalogWeaknessSeeder
+from open_range.world_ir import WorldIR
 from tests.support import manifest_payload
 
 
@@ -87,6 +88,7 @@ def test_build_config_can_filter_services_without_touching_manifest_schema(
     )
 
     assert candidate.world.allowed_service_kinds == ("web_app", "idp", "siem")
+    assert candidate.world.security_runtime.tier == 1
 
 
 def test_build_config_can_enable_security_integration(tmp_path: Path):
@@ -104,6 +106,12 @@ def test_build_config_can_enable_security_integration(tmp_path: Path):
     )
 
     assert candidate.build_config == build_config
+    assert candidate.world.security_runtime.tier == 3
+    idp_payload_spec = candidate.world.security_runtime.service_runtime[
+        "svc-idp"
+    ].payloads[0]
+    assert idp_payload_spec.source_path.startswith("security/idp/")
+    assert "content" not in idp_payload_spec.model_dump(by_alias=True)
     assert candidate.artifacts.chart_values["security"]["tier"] == 3
     assert any(
         path.endswith("security/security-context.json")
@@ -170,6 +178,53 @@ def test_security_integration_renders_idp_runtime_hooks_with_helm(tmp_path: Path
     assert "containerPort: 8443" in rendered
     assert "/opt/openrange/start_identity_provider.sh" in rendered
     assert "name: idp-helper" in rendered
+
+
+def test_security_runtime_round_trips_through_world_ir_json(tmp_path: Path):
+    pipeline = BuildPipeline(store=FileSnapshotStore(tmp_path / "snapshots"))
+    candidate = pipeline.build(
+        _manifest_payload(),
+        tmp_path / "rendered-security-roundtrip",
+        BuildConfig(
+            validation_profile="graph_only",
+            security_integration_enabled=True,
+            security_tier=3,
+        ),
+    )
+
+    round_tripped = WorldIR.model_validate_json(candidate.world.model_dump_json())
+
+    assert round_tripped.security_runtime.tier == 3
+    payload = round_tripped.security_runtime.service_runtime["svc-idp"].payloads[0]
+    assert payload.key
+    assert payload.source_path.startswith("security/idp/")
+    assert "content" not in payload.model_dump(by_alias=True)
+
+
+def test_security_runtime_materialization_is_deterministic(tmp_path: Path):
+    pipeline = BuildPipeline(store=FileSnapshotStore(tmp_path / "snapshots"))
+    candidate = pipeline.build(
+        _manifest_payload(),
+        tmp_path / "rendered-security-deterministic",
+        BuildConfig(
+            validation_profile="graph_only",
+            security_integration_enabled=True,
+            security_tier=3,
+        ),
+    )
+
+    renderer = EnterpriseSaaSKindRenderer()
+    renderer.render(candidate.world, candidate.synth, tmp_path / "render-a")
+    renderer.render(candidate.world, candidate.synth, tmp_path / "render-b")
+
+    for relative_path in (
+        "security/encryption/wrapped_dek.json",
+        "security/mtls/svc-db/key.pem",
+        "security/security-context.json",
+    ):
+        assert (tmp_path / "render-a" / relative_path).read_text(encoding="utf-8") == (
+            tmp_path / "render-b" / relative_path
+        ).read_text(encoding="utf-8")
 
 
 def test_renderer_applies_runtime_extensions_during_render(tmp_path: Path):

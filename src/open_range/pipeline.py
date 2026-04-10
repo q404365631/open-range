@@ -17,11 +17,8 @@ from open_range.compiler import EnterpriseSaaSManifestCompiler
 from open_range.k3d_renderer import K3dRenderer
 from open_range.manifest import EnterpriseSaaSManifest, validate_manifest
 from open_range.render import EnterpriseSaaSKindRenderer
-from open_range.security_integrator import (
-    SecurityContext,
-    SecurityIntegrator,
-    SecurityIntegratorConfig,
-)
+from open_range.security_runtime import SecurityRuntimeSpec
+from open_range.security_integrator import SecurityIntegrator, SecurityIntegratorConfig
 from open_range.snapshot import KindArtifacts, Snapshot
 from open_range.store import FileSnapshotStore, PoolSplit
 from open_range.synth import EnterpriseSaaSWorldSynthesizer, SynthArtifacts
@@ -68,17 +65,7 @@ class BuildPipeline:
     ) -> CandidateWorld:
         world = self._prepare_world(source, build_config)
         synth = self.synthesizer.synthesize(world, Path(outdir) / "synth")
-        security_context = self._security_context(world, Path(outdir), build_config)
-        artifacts = self._renderer_for(build_config).render(
-            world,
-            synth,
-            Path(outdir),
-            extensions=(
-                security_context.render_extensions()
-                if security_context is not None
-                else None
-            ),
-        )
+        artifacts = self._renderer_for(build_config).render(world, synth, Path(outdir))
         artifacts = self._integrate_network_policies(artifacts, build_config)
         return CandidateWorld(
             world=world, synth=synth, artifacts=artifacts, build_config=build_config
@@ -121,14 +108,15 @@ class BuildPipeline:
         build_config: BuildConfig,
     ) -> WorldIR:
         if isinstance(source, WorldIR):
-            return source if source.weaknesses else self.seeder.apply(source)
+            world = source if source.weaknesses else self.seeder.apply(source)
+            return self._attach_security_runtime(world, build_config)
         parsed = (
             source
             if isinstance(source, EnterpriseSaaSManifest)
             else validate_manifest(source)
         )
         world = self.compiler.compile(parsed, build_config)
-        return self.seeder.apply(world)
+        return self._attach_security_runtime(self.seeder.apply(world), build_config)
 
     def _renderer_for(self, build_config: BuildConfig) -> EnterpriseSaaSKindRenderer:
         if self.renderer is not None and not isinstance(
@@ -142,23 +130,18 @@ class BuildPipeline:
             )
         return self.renderer
 
-    def _security_context(
+    def _attach_security_runtime(
         self,
         world: WorldIR,
-        outdir: Path,
         build_config: BuildConfig,
-    ) -> SecurityContext | None:
+    ) -> WorldIR:
         if not build_config.security_enabled:
-            return None
+            return world.model_copy(update={"security_runtime": SecurityRuntimeSpec()})
         integrator = self.security_integrator or SecurityIntegrator(
             SecurityIntegratorConfig(enabled=True)
         )
-        context = integrator.integrate(
-            world,
-            render_dir=outdir,
-            tier=build_config.security_tier,
-        )
-        return context if context.generated_files else None
+        runtime = integrator.plan(world, tier=build_config.security_tier)
+        return world.model_copy(update={"security_runtime": runtime})
 
     def _integrate_network_policies(
         self,
