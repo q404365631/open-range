@@ -149,6 +149,19 @@ class TestIdentityIntegration:
             render_dir / "security" / "idp" / "identity_provider_server.py"
         ).exists()
 
+    def test_idp_sidecar_patch_uses_explicit_service_inheritance(
+        self, sample_world, render_dir
+    ):
+        integrator = SecurityIntegrator(SecurityIntegratorConfig(enabled=True))
+        ctx = integrator.integrate(sample_world, render_dir=render_dir, tier=2)
+
+        idp_sidecar = ctx.service_patches["svc-idp"].sidecars[0]
+
+        assert idp_sidecar.name == "idp-helper"
+        assert idp_sidecar.image is None
+        assert idp_sidecar.inherit_image_from_service is True
+        assert idp_sidecar.inherit_payloads_from_service is True
+
     def test_spiffe_ids_in_identities(self, sample_world, render_dir):
         integrator = SecurityIntegrator(SecurityIntegratorConfig(enabled=True))
         ctx = integrator.integrate(sample_world, render_dir=render_dir, tier=2)

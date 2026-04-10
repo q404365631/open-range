@@ -18,9 +18,11 @@ from open_range.k3d_renderer import K3dRenderer
 from open_range.manifest import EnterpriseSaaSManifest, validate_manifest
 from open_range.render import EnterpriseSaaSKindRenderer
 from open_range.security_integrator import (
+    PayloadPatch,
     SecurityContext,
     SecurityIntegrator,
     SecurityIntegratorConfig,
+    SidecarPatch,
 )
 from open_range.snapshot import KindArtifacts, Snapshot
 from open_range.store import FileSnapshotStore, PoolSplit
@@ -175,30 +177,29 @@ class BuildPipeline:
         context: SecurityContext,
     ) -> dict[str, Any]:
         next_services = {name: dict(spec) for name, spec in services.items()}
-        
-        for service_id, patches in context.service_patches.items():
+
+        for service_id, patch in context.service_patches.items():
             if service_id not in next_services:
                 continue
-            if "payloads" in patches:
-                self._append_payloads(next_services, service_id, patches["payloads"])
-            if "ports" in patches:
-                for port in patches["ports"]:
+            if patch.payloads:
+                self._append_payloads(next_services, service_id, patch.payloads)
+            if patch.ports:
+                for port in patch.ports:
                     self._append_port(next_services, service_id, port)
-            if "sidecars" in patches:
-                for sidecar in patches["sidecars"]:
-                    # Dynamically adopt the host service's image if we don't have a specific backend
-                    if sidecar.get("image") == "python:3.11-alpine" and "image" in next_services[service_id]:
-                        sidecar["image"] = next_services[service_id]["image"]
-                    # Adopt the host service's payloads into the sidecar
-                    if "payloads" in sidecar and not sidecar["payloads"]:
-                        sidecar["payloads"] = list(next_services[service_id].get("payloads", []))
-                self._set_sidecars(next_services, service_id, patches["sidecars"])
+            if patch.sidecars:
+                resolved_sidecars = [
+                    self._resolve_sidecar_patch(
+                        next_services[service_id], service_id, sidecar
+                    )
+                    for sidecar in patch.sidecars
+                ]
+                self._set_sidecars(next_services, service_id, resolved_sidecars)
 
         return next_services
 
     @staticmethod
     def _append_payloads(
-        services: dict[str, Any], service_id: str, payloads: list[dict[str, str] | None]
+        services: dict[str, Any], service_id: str, payloads: list[PayloadPatch | None]
     ) -> None:
         service = services.get(service_id)
         if not isinstance(service, dict):
@@ -207,7 +208,7 @@ class BuildPipeline:
         for payload in payloads:
             if payload is None:
                 continue
-            existing.append(payload)
+            existing.append(payload.model_dump(mode="json"))
         service["payloads"] = existing
 
     @staticmethod
@@ -231,6 +232,36 @@ class BuildPipeline:
         if not isinstance(service, dict):
             return
         service["sidecars"] = sidecars
+
+    @staticmethod
+    def _resolve_sidecar_patch(
+        service: dict[str, Any],
+        service_id: str,
+        sidecar: SidecarPatch,
+    ) -> dict[str, Any]:
+        image = sidecar.image
+        if sidecar.inherit_image_from_service:
+            image = service.get("image", image)
+        if image is None:
+            raise ValueError(
+                f"sidecar {sidecar.name!r} for service {service_id!r} has no image"
+            )
+
+        payloads = [payload.model_dump(mode="json") for payload in sidecar.payloads]
+        if sidecar.inherit_payloads_from_service:
+            payloads = list(service.get("payloads", [])) + payloads
+
+        resolved = sidecar.model_dump(
+            mode="json",
+            exclude={
+                "inherit_image_from_service",
+                "inherit_payloads_from_service",
+            },
+            exclude_none=True,
+        )
+        resolved["image"] = image
+        resolved["payloads"] = payloads
+        return resolved
 
     @staticmethod
     def _payload_entry(

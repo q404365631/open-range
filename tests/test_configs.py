@@ -112,6 +112,9 @@ def test_build_config_can_enable_security_integration(tmp_path: Path):
         "/bin/sh",
         "/opt/openrange/start_identity_provider.sh",
     ]
+    assert idp_sidecar["image"] == idp_service["image"]
+    assert "inherit_image_from_service" not in idp_sidecar
+    assert "inherit_payloads_from_service" not in idp_sidecar
     assert any(
         payload["mountPath"] == "/opt/openrange/start_identity_provider.sh"
         for payload in idp_sidecar["payloads"]

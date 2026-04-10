@@ -31,9 +31,9 @@ import random
 from copy import deepcopy
 from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from open_range.world_ir import WorldIR
 
@@ -143,26 +143,64 @@ class SecurityContext(BaseModel):
     mtls: dict[str, Any] = Field(default_factory=dict)
     npc_credential_lifecycle: dict[str, Any] = Field(default_factory=dict)
     generated_files: list[str] = Field(default_factory=list)
-    service_patches: dict[str, dict[str, list[Any]]] = Field(default_factory=dict)
+    service_patches: dict[str, "ServicePatch"] = Field(default_factory=dict)
 
-    def append_patch(self, service_id: str, patch_type: str, item: Any) -> None:
-        if service_id not in self.service_patches:
-            self.service_patches[service_id] = {}
-        if patch_type not in self.service_patches[service_id]:
-            self.service_patches[service_id][patch_type] = []
+    def append_patch(
+        self,
+        service_id: str,
+        patch_type: Literal["payloads", "ports", "sidecars"],
+        item: Any,
+    ) -> None:
+        patch = self.service_patches.setdefault(service_id, ServicePatch())
         if item is not None:
-            self.service_patches[service_id][patch_type].append(item)
+            getattr(patch, patch_type).append(item)
 
     def payload_patch(
         self, source_path: Path, key: str, mount_path: str
-    ) -> dict[str, str] | None:
+    ) -> PayloadPatch | None:
         if not source_path.exists():
             return None
-        return {
-            "key": key,
-            "mountPath": mount_path,
-            "content": source_path.read_text(encoding="utf-8"),
-        }
+        return PayloadPatch(
+            key=key,
+            mountPath=mount_path,
+            content=source_path.read_text(encoding="utf-8"),
+        )
+
+
+class PayloadPatch(BaseModel):
+    """Mountable content to inject into a service."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    mountPath: str
+    content: str
+
+
+class SidecarPatch(BaseModel):
+    """Additional container attached to a rendered service."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    image: str | None = None
+    command: list[str] = Field(default_factory=list)
+    args: list[str] = Field(default_factory=list)
+    ports: list[dict[str, Any]] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    payloads: list[PayloadPatch] = Field(default_factory=list)
+    inherit_image_from_service: bool = False
+    inherit_payloads_from_service: bool = False
+
+
+class ServicePatch(BaseModel):
+    """Rendered-service mutations produced by an integration pass."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    payloads: list[PayloadPatch] = Field(default_factory=list)
+    ports: list[dict[str, Any]] = Field(default_factory=list)
+    sidecars: list[SidecarPatch] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -322,19 +360,60 @@ class SecurityIntegrator:
             ]
         )
 
-        idp_targets = [service.id for service in world.services if service.kind == "idp"]
+        idp_targets = [
+            service.id for service in world.services if service.kind == "idp"
+        ]
         if idp_targets:
             idp_id = idp_targets[0]
-            ctx.append_patch(idp_id, "payloads", ctx.payload_patch(idp_dir / "config.json", "security-idp-config.json", "/etc/openrange/identity-provider.json"))
-            ctx.append_patch(idp_id, "payloads", ctx.payload_patch(idp_dir / "startup.sh", "security-idp-startup.sh", "/opt/openrange/start_identity_provider.sh"))
-            ctx.append_patch(idp_id, "payloads", ctx.payload_patch(idp_dir / "identity_provider_server.py", "security-idp-server.py", "/opt/openrange/identity_provider_server.py"))
-            ctx.append_patch(idp_id, "ports", {"name": "idp-token", "port": int(idp_config.token_endpoint_port if hasattr(idp_config, "token_endpoint_port") else 8443)})
-            ctx.append_patch(idp_id, "sidecars", {
-                "name": "idp-helper",
-                "image": "python:3.11-alpine", # Will be patched dynamically in pipeline.py
-                "command": ["/bin/sh", "/opt/openrange/start_identity_provider.sh"],
-                "payloads": []
-            })
+            ctx.append_patch(
+                idp_id,
+                "payloads",
+                ctx.payload_patch(
+                    idp_dir / "config.json",
+                    "security-idp-config.json",
+                    "/etc/openrange/identity-provider.json",
+                ),
+            )
+            ctx.append_patch(
+                idp_id,
+                "payloads",
+                ctx.payload_patch(
+                    idp_dir / "startup.sh",
+                    "security-idp-startup.sh",
+                    "/opt/openrange/start_identity_provider.sh",
+                ),
+            )
+            ctx.append_patch(
+                idp_id,
+                "payloads",
+                ctx.payload_patch(
+                    idp_dir / "identity_provider_server.py",
+                    "security-idp-server.py",
+                    "/opt/openrange/identity_provider_server.py",
+                ),
+            )
+            ctx.append_patch(
+                idp_id,
+                "ports",
+                {
+                    "name": "idp-token",
+                    "port": int(
+                        idp_config.token_endpoint_port
+                        if hasattr(idp_config, "token_endpoint_port")
+                        else 8443
+                    ),
+                },
+            )
+            ctx.append_patch(
+                idp_id,
+                "sidecars",
+                SidecarPatch(
+                    name="idp-helper",
+                    command=["/bin/sh", "/opt/openrange/start_identity_provider.sh"],
+                    inherit_image_from_service=True,
+                    inherit_payloads_from_service=True,
+                ),
+            )
 
         logger.debug(
             "Identity provider integrated: %d service identities", len(identities)
@@ -429,8 +508,24 @@ class SecurityIntegrator:
             )
 
             for svc_name in services:
-                ctx.append_patch(svc_name, "payloads", ctx.payload_patch(enc_dir / "config.json", "security-encryption-config.json", "/etc/openrange/encryption-config.json"))
-                ctx.append_patch(svc_name, "payloads", ctx.payload_patch(enc_dir / "wrapped_dek.json", "security-wrapped-dek.json", "/etc/openrange/wrapped_dek.json"))
+                ctx.append_patch(
+                    svc_name,
+                    "payloads",
+                    ctx.payload_patch(
+                        enc_dir / "config.json",
+                        "security-encryption-config.json",
+                        "/etc/openrange/encryption-config.json",
+                    ),
+                )
+                ctx.append_patch(
+                    svc_name,
+                    "payloads",
+                    ctx.payload_patch(
+                        enc_dir / "wrapped_dek.json",
+                        "security-wrapped-dek.json",
+                        "/etc/openrange/wrapped_dek.json",
+                    ),
+                )
 
         logger.debug(
             "Encryption integrated: %d credentials encrypted", len(encrypted_refs)
@@ -489,10 +584,34 @@ class SecurityIntegrator:
                 fname = payload["mountPath"].rsplit("/", 1)[-1]
                 (svc_dir / fname).write_text(payload["content"], encoding="utf-8")
                 ctx.generated_files.append(str(svc_dir / fname))
-                
-            ctx.append_patch(svc_name, "payloads", ctx.payload_patch(svc_dir / "ca.pem", "security-mtls-ca.pem", "/etc/mtls/ca.pem"))
-            ctx.append_patch(svc_name, "payloads", ctx.payload_patch(svc_dir / "cert.pem", "security-mtls-cert.pem", "/etc/mtls/cert.pem"))
-            ctx.append_patch(svc_name, "payloads", ctx.payload_patch(svc_dir / "key.pem", "security-mtls-key.pem", "/etc/mtls/key.pem"))
+
+            ctx.append_patch(
+                svc_name,
+                "payloads",
+                ctx.payload_patch(
+                    svc_dir / "ca.pem",
+                    "security-mtls-ca.pem",
+                    "/etc/mtls/ca.pem",
+                ),
+            )
+            ctx.append_patch(
+                svc_name,
+                "payloads",
+                ctx.payload_patch(
+                    svc_dir / "cert.pem",
+                    "security-mtls-cert.pem",
+                    "/etc/mtls/cert.pem",
+                ),
+            )
+            ctx.append_patch(
+                svc_name,
+                "payloads",
+                ctx.payload_patch(
+                    svc_dir / "key.pem",
+                    "security-mtls-key.pem",
+                    "/etc/mtls/key.pem",
+                ),
+            )
 
         ctx.mtls = mtls_config.model_dump()
 
