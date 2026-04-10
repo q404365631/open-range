@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from open_range.security_runtime import materialize_security_runtime
 from open_range.security_integrator import (
     DEFAULT_TIER_MAP,
     SecurityIntegrator,
@@ -104,7 +105,7 @@ class TestIntegratorDisabled:
         assert ctx.tier == 3
         assert not ctx.identity_provider
         assert not ctx.encryption
-        assert not ctx.generated_files
+        assert not ctx.service_runtime
 
     def test_noop_for_tier1(self, sample_world, render_dir):
         integrator = SecurityIntegrator(SecurityIntegratorConfig(enabled=True))
@@ -135,9 +136,11 @@ class TestIdentityIntegration:
         integrator = SecurityIntegrator(SecurityIntegratorConfig(enabled=True))
         integrator.integrate(sample_world, render_dir=render_dir, tier=2)
 
-        idp_config_path = render_dir / "security" / "idp" / "config.json"
-        assert idp_config_path.exists()
-        data = json.loads(idp_config_path.read_text())
+        data = json.loads(
+            (render_dir / "security" / "idp" / "config.json").read_text(
+                encoding="utf-8"
+            )
+        )
         assert data["enabled"] is True
 
     def test_idp_runtime_files_written(self, sample_world, render_dir):
@@ -155,12 +158,27 @@ class TestIdentityIntegration:
         integrator = SecurityIntegrator(SecurityIntegratorConfig(enabled=True))
         ctx = integrator.integrate(sample_world, render_dir=render_dir, tier=2)
 
-        idp_sidecar = ctx.service_patches["svc-idp"].sidecars[0]
+        idp_sidecar = ctx.service_runtime["svc-idp"].sidecars[0]
 
         assert idp_sidecar.name == "idp-helper"
-        assert idp_sidecar.image is None
-        assert idp_sidecar.inherit_image_from_service is True
-        assert idp_sidecar.inherit_payloads_from_service is True
+        assert idp_sidecar.image_source == "service"
+        assert idp_sidecar.include_service_payloads is True
+
+    def test_render_extensions_export_security_runtime_and_summary(
+        self, sample_world, render_dir
+    ):
+        integrator = SecurityIntegrator(SecurityIntegratorConfig(enabled=True))
+        ctx = integrator.integrate(sample_world, render_dir=render_dir, tier=2)
+        render_world = sample_world.model_copy(update={"security_runtime": ctx})
+        extensions = materialize_security_runtime(render_world, render_dir)
+
+        assert "svc-idp" in extensions.services
+        assert extensions.values["security"]["tier"] == 2
+        assert extensions.summary_updates["security_tier"] == 2
+        assert any(
+            path.endswith("security/security-context.json")
+            for path in extensions.rendered_files
+        )
 
     def test_spiffe_ids_in_identities(self, sample_world, render_dir):
         integrator = SecurityIntegrator(SecurityIntegratorConfig(enabled=True))
@@ -194,9 +212,11 @@ class TestEncryptionIntegration:
         )
         integrator.integrate(sample_world, render_dir=render_dir, tier=2)
 
-        dek_path = render_dir / "security" / "encryption" / "wrapped_dek.json"
-        assert dek_path.exists()
-        data = json.loads(dek_path.read_text())
+        data = json.loads(
+            (render_dir / "security" / "encryption" / "wrapped_dek.json").read_text(
+                encoding="utf-8"
+            )
+        )
         assert isinstance(data, dict)
         assert len(data) >= 1
 
@@ -216,11 +236,19 @@ class TestMTLSIntegration:
 
         assert ctx.mtls
         assert ctx.mtls["enabled"] is True
-        # Cert files should exist
-        mtls_dir = render_dir / "security" / "mtls"
-        assert mtls_dir.exists()
-        cert_files = list(mtls_dir.rglob("*.pem"))
+        cert_files = list((render_dir / "security" / "mtls").glob("*/*.pem"))
         assert len(cert_files) >= 3
+        assert ctx.service_runtime["svc-idp"].env["LDAP_TLS_VERIFY_CLIENT"] == "demand"
+        assert ctx.service_runtime["svc-idp"].env["LDAP_TLS_CRT_FILENAME"] == "ldap.crt"
+        assert any(
+            payload.mount_path == "/container/service/slapd/assets/certs/ldap.crt"
+            for payload in ctx.service_runtime["svc-idp"].payloads
+        )
+        assert any(port.port == 636 for port in ctx.service_runtime["svc-idp"].ports)
+        assert any(
+            payload.mount_path == "/etc/mysql/conf.d/openrange-mtls.cnf"
+            for payload in ctx.service_runtime["svc-db"].payloads
+        )
 
     @pytest.mark.skipif(
         not _has_cryptography(), reason="cryptography library not available"
@@ -292,6 +320,4 @@ class TestFullIntegration:
         assert ctx.mtls
         assert ctx.npc_credential_lifecycle
 
-        # Security context file should exist
-        ctx_path = render_dir / "security" / "security-context.json"
-        assert ctx_path.exists()
+        assert (render_dir / "security" / "security-context.json").exists()

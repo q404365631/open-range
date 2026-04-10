@@ -1,4 +1,4 @@
-"""Wire security training modules into the v1 build pipeline.
+"""Plan security runtime intent for the v1 build pipeline.
 
 The ``SecurityIntegrator`` orchestrates the four training-layer modules
 (Identity Provider, Envelope Encryption, mTLS Simulation, NPC Credential
@@ -12,9 +12,9 @@ Tier mapping (configurable):
 - **Tier 3+**: Full stack -- identity + encryption + mTLS + NPC credential
   lifecycle with authorization policies.
 
-The integrator runs as a post-render enrichment step.  It reads the
-``WorldIR``, generates security artefacts, and writes them as JSON
-config files alongside the rendered Kind/Helm artifacts.
+The integrator builds a security runtime plan from the ``WorldIR`` and build
+tier. The plan is stored on ``WorldIR`` as source-of-truth intent, and render
+later materializes the concrete files and runtime components from that plan.
 
 Ported from k3s-istio-vault-platform's orchestration patterns:
 - App-of-apps component ordering (root-chart)
@@ -24,17 +24,25 @@ Ported from k3s-istio-vault-platform's orchestration patterns:
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import random
 from copy import deepcopy
-from importlib.resources import files
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
+from open_range.runtime_extensions import (
+    RuntimePort,
+    RuntimeSidecar,
+)
+from open_range.security_runtime import (
+    SecurityPayloadSpec,
+    SecurityRuntimeSpec,
+    SecurityServiceRuntimeSpec,
+    materialize_security_runtime,
+)
 from open_range.world_ir import WorldIR
 
 logger = logging.getLogger(__name__)
@@ -130,77 +138,82 @@ class SecurityIntegratorConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Security context returned by the integrator
+# Mutable planning context
 # ---------------------------------------------------------------------------
 
 
+class SecurityServiceRuntimeBuilder(BaseModel):
+    """Mutable runtime builder before freezing onto ``WorldIR``."""
+
+    env: dict[str, str] = Field(default_factory=dict)
+    payloads: list[SecurityPayloadSpec] = Field(default_factory=list)
+    ports: list[RuntimePort] = Field(default_factory=list)
+    sidecars: list[RuntimeSidecar] = Field(default_factory=list)
+
+
 class SecurityContext(BaseModel):
-    """Result of a security integration pass."""
+    """Mutable planner context before freezing onto ``WorldIR``."""
 
     tier: int = 1
     identity_provider: dict[str, Any] = Field(default_factory=dict)
     encryption: dict[str, Any] = Field(default_factory=dict)
     mtls: dict[str, Any] = Field(default_factory=dict)
     npc_credential_lifecycle: dict[str, Any] = Field(default_factory=dict)
-    generated_files: list[str] = Field(default_factory=list)
-    service_patches: dict[str, "ServicePatch"] = Field(default_factory=dict)
+    service_runtime: dict[str, SecurityServiceRuntimeBuilder] = Field(
+        default_factory=dict
+    )
 
-    def append_patch(
-        self,
-        service_id: str,
-        patch_type: Literal["payloads", "ports", "sidecars"],
-        item: Any,
-    ) -> None:
-        patch = self.service_patches.setdefault(service_id, ServicePatch())
-        if item is not None:
-            getattr(patch, patch_type).append(item)
-
-    def payload_patch(
-        self, source_path: Path, key: str, mount_path: str
-    ) -> PayloadPatch | None:
-        if not source_path.exists():
-            return None
-        return PayloadPatch(
-            key=key,
-            mountPath=mount_path,
-            content=source_path.read_text(encoding="utf-8"),
+    def service_extension(self, service_id: str) -> SecurityServiceRuntimeBuilder:
+        return self.service_runtime.setdefault(
+            service_id, SecurityServiceRuntimeBuilder()
         )
 
+    def append_payload(
+        self, service_id: str, payload: SecurityPayloadSpec | None
+    ) -> None:
+        if payload is not None:
+            self.service_extension(service_id).payloads.append(payload)
 
-class PayloadPatch(BaseModel):
-    """Mountable content to inject into a service."""
+    def append_port(self, service_id: str, port: RuntimePort) -> None:
+        self.service_extension(service_id).ports.append(port)
 
-    model_config = ConfigDict(extra="forbid")
+    def append_sidecar(self, service_id: str, sidecar: RuntimeSidecar) -> None:
+        self.service_extension(service_id).sidecars.append(sidecar)
 
-    key: str
-    mountPath: str
-    content: str
+    def extend_env(self, service_id: str, env: dict[str, str]) -> None:
+        if env:
+            self.service_extension(service_id).env.update(env)
 
+    @staticmethod
+    def runtime_payload(
+        *,
+        key: str,
+        mount_path: str,
+        source_path: str,
+    ) -> SecurityPayloadSpec:
+        return SecurityPayloadSpec(
+            key=key,
+            mountPath=mount_path,
+            source_path=source_path,
+        )
 
-class SidecarPatch(BaseModel):
-    """Additional container attached to a rendered service."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    image: str | None = None
-    command: list[str] = Field(default_factory=list)
-    args: list[str] = Field(default_factory=list)
-    ports: list[dict[str, Any]] = Field(default_factory=list)
-    env: dict[str, str] = Field(default_factory=dict)
-    payloads: list[PayloadPatch] = Field(default_factory=list)
-    inherit_image_from_service: bool = False
-    inherit_payloads_from_service: bool = False
-
-
-class ServicePatch(BaseModel):
-    """Rendered-service mutations produced by an integration pass."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    payloads: list[PayloadPatch] = Field(default_factory=list)
-    ports: list[dict[str, Any]] = Field(default_factory=list)
-    sidecars: list[SidecarPatch] = Field(default_factory=list)
+    def build(self) -> SecurityRuntimeSpec:
+        return SecurityRuntimeSpec(
+            tier=self.tier,
+            identity_provider=self.identity_provider,
+            encryption=self.encryption,
+            mtls=self.mtls,
+            npc_credential_lifecycle=self.npc_credential_lifecycle,
+            service_runtime={
+                service_id: SecurityServiceRuntimeSpec(
+                    env=dict(extension.env),
+                    payloads=tuple(extension.payloads),
+                    ports=tuple(extension.ports),
+                    sidecars=tuple(extension.sidecars),
+                )
+                for service_id, extension in self.service_runtime.items()
+            },
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -209,33 +222,28 @@ class ServicePatch(BaseModel):
 
 
 class SecurityIntegrator:
-    """Orchestrate security module integration into rendered snapshots.
+    """Build security runtime intent from a world and security tier.
 
     Usage::
 
         integrator = SecurityIntegrator(SecurityIntegratorConfig(enabled=True))
-        ctx = integrator.integrate(world, render_dir=Path("/tmp/render"), tier=2)
+        runtime = integrator.plan(world, tier=2)
     """
 
     def __init__(self, config: SecurityIntegratorConfig | None = None) -> None:
         self.config = config or SecurityIntegratorConfig()
 
-    def integrate(
+    def plan(
         self,
         world: WorldIR,
         *,
-        render_dir: Path,
         tier: int = 1,
-    ) -> SecurityContext:
-        """Enrich rendered artifacts with security infrastructure.
-
-        Writes security config and artefact files into *render_dir*.
-        Returns a ``SecurityContext`` summarising what was generated.
-        """
+    ) -> SecurityRuntimeSpec:
+        """Build a security runtime plan that can be attached to ``WorldIR``."""
         ctx = SecurityContext(tier=tier)
 
         if not self.config.enabled:
-            return ctx
+            return ctx.build()
 
         rng = random.Random(f"{world.world_id}:{world.seed}:{tier}")
         tier_cfg = self.config.tier_map.get(
@@ -245,44 +253,51 @@ class SecurityIntegrator:
 
         # Build service→zone mapping from WorldIR
         services: dict[str, str] = {}
+        service_kinds: dict[str, str] = {}
         host_by_id = {h.id: h for h in world.hosts}
         for svc in world.services:
             zone = host_by_id[svc.host].zone if svc.host in host_by_id else "default"
             services[svc.id] = zone
+            service_kinds[svc.id] = svc.kind
 
         domain = "range.local"
-        security_dir = render_dir / "security"
-        security_dir.mkdir(parents=True, exist_ok=True)
 
         if tier_cfg.identity_provider:
-            self._integrate_identity(ctx, world, services, domain, security_dir)
+            self._integrate_identity(ctx, world, services, domain)
 
         if tier_cfg.envelope_encryption:
-            self._integrate_encryption(ctx, world, services, security_dir, rng)
+            self._integrate_encryption(ctx, world, services, rng)
 
         if tier_cfg.mtls:
-            self._integrate_mtls(ctx, services, domain, security_dir, rng)
+            self._integrate_mtls(ctx, services, service_kinds, domain, rng)
 
         if tier_cfg.npc_credential_lifecycle:
-            self._integrate_npc_lifecycle(ctx, security_dir)
-
-        # Write the security context summary
-        ctx_path = security_dir / "security-context.json"
-        ctx_path.write_text(
-            json.dumps(ctx.model_dump(), indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        ctx.generated_files.append(str(ctx_path))
+            self._integrate_npc_lifecycle(ctx)
 
         logger.info(
-            "SecurityIntegrator: enriched render (tier=%d, idp=%s, enc=%s, mtls=%s, npc=%s)",
+            "SecurityIntegrator: planned security runtime (tier=%d, idp=%s, enc=%s, mtls=%s, npc=%s)",
             tier,
             tier_cfg.identity_provider,
             tier_cfg.envelope_encryption,
             tier_cfg.mtls,
             tier_cfg.npc_credential_lifecycle,
         )
-        return ctx
+        return ctx.build()
+
+    def integrate(
+        self,
+        world: WorldIR,
+        *,
+        tier: int = 1,
+        render_dir: object | None = None,
+    ) -> SecurityRuntimeSpec:
+        """Backward-compatible helper for callers still expecting file output."""
+
+        runtime = self.plan(world, tier=tier)
+        if render_dir is not None:
+            render_world = world.model_copy(update={"security_runtime": runtime})
+            materialize_security_runtime(render_world, Path(render_dir))
+        return runtime
 
     # ------------------------------------------------------------------
     # Identity Provider
@@ -294,14 +309,12 @@ class SecurityIntegrator:
         world: WorldIR,
         services: dict[str, str],
         domain: str,
-        security_dir: Path,
     ) -> None:
-        """Generate identity provider config and tokens."""
+        """Declare identity provider runtime intent."""
         try:
             from open_range.identity_provider import (
                 IdentityProviderConfig,
                 ServiceIdentity,
-                SimulatedIdentityProvider,
                 build_spiffe_id,
             )
         except ImportError:
@@ -331,87 +344,53 @@ class SecurityIntegrator:
 
         ctx.identity_provider = idp_config.model_dump()
 
-        # Generate startup script
-        idp = SimulatedIdentityProvider(idp_config)
-        startup_script = idp.generate_startup_script()
-        server_template = (
-            files("open_range")
-            .joinpath("templates")
-            .joinpath("identity_provider_server.py.tpl")
-            .read_text(encoding="utf-8")
-        )
-
-        # Write IdP artifacts
-        idp_dir = security_dir / "idp"
-        idp_dir.mkdir(parents=True, exist_ok=True)
-        (idp_dir / "config.json").write_text(
-            json.dumps(idp_config.model_dump(), indent=2) + "\n", encoding="utf-8"
-        )
-        (idp_dir / "startup.sh").write_text(startup_script, encoding="utf-8")
-        (idp_dir / "identity_provider_server.py").write_text(
-            server_template,
-            encoding="utf-8",
-        )
-        ctx.generated_files.extend(
-            [
-                str(idp_dir / "config.json"),
-                str(idp_dir / "startup.sh"),
-                str(idp_dir / "identity_provider_server.py"),
-            ]
-        )
-
         idp_targets = [
             service.id for service in world.services if service.kind == "idp"
         ]
         if idp_targets:
             idp_id = idp_targets[0]
-            ctx.append_patch(
+            ctx.append_payload(
                 idp_id,
-                "payloads",
-                ctx.payload_patch(
-                    idp_dir / "config.json",
-                    "security-idp-config.json",
-                    "/etc/openrange/identity-provider.json",
+                ctx.runtime_payload(
+                    key="security-idp-config.json",
+                    mount_path="/etc/openrange/identity-provider.json",
+                    source_path="security/idp/config.json",
                 ),
             )
-            ctx.append_patch(
+            ctx.append_payload(
                 idp_id,
-                "payloads",
-                ctx.payload_patch(
-                    idp_dir / "startup.sh",
-                    "security-idp-startup.sh",
-                    "/opt/openrange/start_identity_provider.sh",
+                ctx.runtime_payload(
+                    key="security-idp-startup.sh",
+                    mount_path="/opt/openrange/start_identity_provider.sh",
+                    source_path="security/idp/startup.sh",
                 ),
             )
-            ctx.append_patch(
+            ctx.append_payload(
                 idp_id,
-                "payloads",
-                ctx.payload_patch(
-                    idp_dir / "identity_provider_server.py",
-                    "security-idp-server.py",
-                    "/opt/openrange/identity_provider_server.py",
+                ctx.runtime_payload(
+                    key="security-idp-server.py",
+                    mount_path="/opt/openrange/identity_provider_server.py",
+                    source_path="security/idp/identity_provider_server.py",
                 ),
             )
-            ctx.append_patch(
+            ctx.append_port(
                 idp_id,
-                "ports",
-                {
-                    "name": "idp-token",
-                    "port": int(
+                RuntimePort(
+                    name="idp-token",
+                    port=int(
                         idp_config.token_endpoint_port
                         if hasattr(idp_config, "token_endpoint_port")
                         else 8443
                     ),
-                },
+                ),
             )
-            ctx.append_patch(
+            ctx.append_sidecar(
                 idp_id,
-                "sidecars",
-                SidecarPatch(
+                RuntimeSidecar(
                     name="idp-helper",
-                    command=["/bin/sh", "/opt/openrange/start_identity_provider.sh"],
-                    inherit_image_from_service=True,
-                    inherit_payloads_from_service=True,
+                    image_source="service",
+                    command=("/bin/sh", "/opt/openrange/start_identity_provider.sh"),
+                    include_service_payloads=True,
                 ),
             )
 
@@ -428,15 +407,11 @@ class SecurityIntegrator:
         ctx: SecurityContext,
         world: WorldIR,
         services: dict[str, str],
-        security_dir: Path,
         rng: random.Random,
     ) -> None:
-        """Generate envelope encryption config for credential secrets."""
+        """Declare envelope encryption runtime intent."""
         try:
-            from open_range.envelope_crypto import (
-                EncryptionConfig,
-                EnvelopeCrypto,
-            )
+            from open_range.envelope_crypto import EncryptionConfig
         except ImportError:
             logger.warning(
                 "envelope_crypto module not available; skipping encryption integration"
@@ -458,34 +433,11 @@ class SecurityIntegrator:
             min(n_encrypt, len(credentials)),
         )
 
-        master_key = EnvelopeCrypto.generate_master_key()
-        import base64
-
-        master_key_b64 = base64.b64encode(master_key).decode()
-
         encrypted_refs: list[str] = []
-        dek_metadata: dict[str, Any] = {}
-
-        prev_env = os.environ.get("OPENRANGE_MASTER_KEY")
-        os.environ["OPENRANGE_MASTER_KEY"] = master_key_b64
-        try:
-            crypto = EnvelopeCrypto(master_key)
-            for idx in indices:
-                cred = credentials[idx]
-                aad = f"openrange:range:{cred.subject}:{cred.id}"
-                bundle = crypto.encrypt(cred.secret_ref, aad=aad)
-                encrypted_refs.append(cred.id)
-                dek_metadata[cred.id] = bundle.model_dump()
-        finally:
-            if prev_env is None:
-                os.environ.pop("OPENRANGE_MASTER_KEY", None)
-            else:
-                os.environ["OPENRANGE_MASTER_KEY"] = prev_env
+        for idx in indices:
+            encrypted_refs.append(credentials[idx].id)
 
         if encrypted_refs:
-            enc_dir = security_dir / "encryption"
-            enc_dir.mkdir(parents=True, exist_ok=True)
-
             enc_config = EncryptionConfig(
                 enabled=True,
                 encrypted_paths=encrypted_refs,
@@ -494,36 +446,21 @@ class SecurityIntegrator:
             )
             ctx.encryption = enc_config.model_dump()
 
-            (enc_dir / "config.json").write_text(
-                json.dumps(enc_config.model_dump(), indent=2) + "\n", encoding="utf-8"
-            )
-            (enc_dir / "wrapped_dek.json").write_text(
-                json.dumps(dek_metadata, indent=2) + "\n", encoding="utf-8"
-            )
-            ctx.generated_files.extend(
-                [
-                    str(enc_dir / "config.json"),
-                    str(enc_dir / "wrapped_dek.json"),
-                ]
-            )
-
             for svc_name in services:
-                ctx.append_patch(
+                ctx.append_payload(
                     svc_name,
-                    "payloads",
-                    ctx.payload_patch(
-                        enc_dir / "config.json",
-                        "security-encryption-config.json",
-                        "/etc/openrange/encryption-config.json",
+                    ctx.runtime_payload(
+                        key="security-encryption-config.json",
+                        mount_path="/etc/openrange/encryption-config.json",
+                        source_path="security/encryption/config.json",
                     ),
                 )
-                ctx.append_patch(
+                ctx.append_payload(
                     svc_name,
-                    "payloads",
-                    ctx.payload_patch(
-                        enc_dir / "wrapped_dek.json",
-                        "security-wrapped-dek.json",
-                        "/etc/openrange/wrapped_dek.json",
+                    ctx.runtime_payload(
+                        key="security-wrapped-dek.json",
+                        mount_path="/etc/openrange/wrapped_dek.json",
+                        source_path="security/encryption/wrapped_dek.json",
                     ),
                 )
 
@@ -539,11 +476,11 @@ class SecurityIntegrator:
         self,
         ctx: SecurityContext,
         services: dict[str, str],
+        service_kinds: dict[str, str],
         domain: str,
-        security_dir: Path,
         rng: random.Random,
     ) -> None:
-        """Generate TLS certificates for service-to-service mTLS."""
+        """Declare mTLS artifacts plus supported runtime hooks for services."""
         try:
             from open_range.mtls_sim import MTLSConfig, MTLSSimulator
         except ImportError:
@@ -565,63 +502,75 @@ class SecurityIntegrator:
             mtls_services=mtls_services,
             weaknesses=weaknesses,
         )
-
-        sim = MTLSSimulator(mtls_config)
-        # Build zones dict from services mapping
-        zones_dict: dict[str, list[str]] = {}
-        for svc_name, zone in services.items():
-            zones_dict.setdefault(zone, []).append(svc_name)
-
-        bundles = sim.generate_all_certs(services, zones_dict)
-
-        mtls_dir = security_dir / "mtls"
-        mtls_dir.mkdir(parents=True, exist_ok=True)
-
-        for svc_name, bundle in bundles.items():
-            svc_dir = mtls_dir / svc_name
-            svc_dir.mkdir(parents=True, exist_ok=True)
-            for payload in sim.get_payload_files(bundle):
-                fname = payload["mountPath"].rsplit("/", 1)[-1]
-                (svc_dir / fname).write_text(payload["content"], encoding="utf-8")
-                ctx.generated_files.append(str(svc_dir / fname))
-
-            ctx.append_patch(
+        for svc_name in mtls_services:
+            ctx.append_payload(
                 svc_name,
-                "payloads",
-                ctx.payload_patch(
-                    svc_dir / "ca.pem",
-                    "security-mtls-ca.pem",
-                    "/etc/mtls/ca.pem",
+                ctx.runtime_payload(
+                    key="security-mtls-ca.pem",
+                    mount_path="/etc/mtls/ca.pem",
+                    source_path=f"security/mtls/{svc_name}/ca.pem",
                 ),
             )
-            ctx.append_patch(
+            ctx.append_payload(
                 svc_name,
-                "payloads",
-                ctx.payload_patch(
-                    svc_dir / "cert.pem",
-                    "security-mtls-cert.pem",
-                    "/etc/mtls/cert.pem",
+                ctx.runtime_payload(
+                    key="security-mtls-cert.pem",
+                    mount_path="/etc/mtls/cert.pem",
+                    source_path=f"security/mtls/{svc_name}/cert.pem",
                 ),
             )
-            ctx.append_patch(
+            ctx.append_payload(
                 svc_name,
-                "payloads",
-                ctx.payload_patch(
-                    svc_dir / "key.pem",
-                    "security-mtls-key.pem",
-                    "/etc/mtls/key.pem",
+                ctx.runtime_payload(
+                    key="security-mtls-key.pem",
+                    mount_path="/etc/mtls/key.pem",
+                    source_path=f"security/mtls/{svc_name}/key.pem",
                 ),
             )
+            service_kind = service_kinds.get(svc_name, "")
+            if service_kind == "idp":
+                ctx.extend_env(svc_name, MTLSSimulator.get_service_tls_env("openldap"))
+                ctx.append_payload(
+                    svc_name,
+                    ctx.runtime_payload(
+                        key="security-mtls-openldap-ca.crt",
+                        mount_path="/container/service/slapd/assets/certs/ca.crt",
+                        source_path=f"security/mtls/{svc_name}/ca.pem",
+                    ),
+                )
+                ctx.append_payload(
+                    svc_name,
+                    ctx.runtime_payload(
+                        key="security-mtls-openldap-ldap.crt",
+                        mount_path="/container/service/slapd/assets/certs/ldap.crt",
+                        source_path=f"security/mtls/{svc_name}/cert.pem",
+                    ),
+                )
+                ctx.append_payload(
+                    svc_name,
+                    ctx.runtime_payload(
+                        key="security-mtls-openldap-ldap.key",
+                        mount_path="/container/service/slapd/assets/certs/ldap.key",
+                        source_path=f"security/mtls/{svc_name}/key.pem",
+                    ),
+                )
+                ctx.append_port(svc_name, RuntimePort(name="ldaps", port=636))
+            if service_kind == "db":
+                ctx.append_payload(
+                    svc_name,
+                    ctx.runtime_payload(
+                        key="security-mtls-mysql.cnf",
+                        mount_path="/etc/mysql/conf.d/openrange-mtls.cnf",
+                        source_path=f"security/mtls/{svc_name}/mysql.cnf",
+                    ),
+                )
 
         ctx.mtls = mtls_config.model_dump()
 
-        (mtls_dir / "config.json").write_text(
-            json.dumps(mtls_config.model_dump(), indent=2) + "\n", encoding="utf-8"
-        )
-        ctx.generated_files.append(str(mtls_dir / "config.json"))
-
         logger.debug(
-            "mTLS integrated: %d services, weaknesses=%s", len(bundles), weaknesses
+            "mTLS integrated: %d services, weaknesses=%s",
+            len(mtls_services),
+            weaknesses,
         )
 
     # ------------------------------------------------------------------
@@ -631,9 +580,8 @@ class SecurityIntegrator:
     def _integrate_npc_lifecycle(
         self,
         ctx: SecurityContext,
-        security_dir: Path,
     ) -> None:
-        """Configure NPC credential lifecycle."""
+        """Declare NPC credential lifecycle runtime intent."""
         try:
             from open_range.credential_lifecycle import CredentialLifecycleConfig
         except ImportError:
@@ -650,13 +598,6 @@ class SecurityIntegrator:
         )
 
         ctx.npc_credential_lifecycle = lifecycle_config.model_dump()
-
-        npc_dir = security_dir / "npc"
-        npc_dir.mkdir(parents=True, exist_ok=True)
-        (npc_dir / "config.json").write_text(
-            json.dumps(lifecycle_config.model_dump(), indent=2) + "\n", encoding="utf-8"
-        )
-        ctx.generated_files.append(str(npc_dir / "config.json"))
 
         logger.debug(
             "NPC credential lifecycle integrated: weaknesses=%s",
