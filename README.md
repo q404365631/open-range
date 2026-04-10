@@ -5,7 +5,7 @@
   <br />
   <img src="https://img.shields.io/badge/Package-open--range-blue" alt="Package: open-range" />
   <img src="https://img.shields.io/badge/Runtime-red%2Fblue%2Fgreen-red" alt="Runtime: red/blue/green" />
-  <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0" />
+  <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" />
 </div>
 
 OpenRange is a manifest-first cyber range for training red and blue agents in
@@ -14,7 +14,7 @@ validates that world with private reference traces and deterministic probes,
 freezes it as an immutable snapshot, and runs episodes with red, blue, and
 green-user dynamics.
 
-> **Project Provenance:** OpenRange is managed by **Vecna** as an open-source project. 
+> **Project Provenance:** OpenRange is managed by **Vecna** as an open-source project.
 > The core evaluation engine and admission concepts in this repository were heavily inspired by the [open-cybernauts/open-range](https://github.com/open-cybernauts/open-range) proof of concept built during the OpenEnv HuggingFace Hackathon in early March.
 
 This branch exposes OpenRange as an installable Python package and CLI. It is
@@ -261,4 +261,4 @@ uv run pre-commit run --all-files
 
 ## License
 
-Apache 2.0
+MIT
