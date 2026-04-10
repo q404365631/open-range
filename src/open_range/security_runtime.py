@@ -24,6 +24,10 @@ if TYPE_CHECKING:
     from open_range.world_ir import WorldIR
 
 
+_DETERMINISTIC_CERT_EPOCH = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+_MIN_RENDER_CERT_VALIDITY_DAYS = 3650
+
+
 _STATIC_CA_PRIVATE_KEY_PEM = """-----BEGIN RSA PRIVATE KEY-----
 MIIEpAIBAAKCAQEAuhvpIJGaPyUf0YjDUbgPX9tj6kBbvQDuDZ7JbVOoV2/8haNi
 gdZCKTLZWDkeCtXKFDitAW4LTSy0kNfQOEMyfG6O1fcDI2+D7GjHtG5EVg+yxGFl
@@ -380,7 +384,11 @@ def _mtls_files(
         return {}
 
     services, _ = _service_zone_layout(world)
-    now = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+    now = _DETERMINISTIC_CERT_EPOCH
+    # Keep deterministic render-time certs valid across calendar time.
+    # The explicit expired_cert weakness remains the supported way to
+    # materialize an actually expired certificate.
+    validity_days = max(config.cert_validity_days, _MIN_RENDER_CERT_VALIDITY_DAYS)
 
     def load_key(pem: str) -> rsa.RSAPrivateKey:
         return serialization.load_pem_private_key(pem.encode("utf-8"), password=None)
@@ -410,7 +418,7 @@ def _mtls_files(
         .public_key(ca_key.public_key())
         .serial_number(_serial_number(world, security_runtime, "mtls-ca"))
         .not_valid_before(now)
-        .not_valid_after(now + datetime.timedelta(days=config.cert_validity_days * 2))
+        .not_valid_after(now + datetime.timedelta(days=validity_days * 2))
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
         .sign(ca_key, hashes.SHA256())
     )
@@ -421,13 +429,15 @@ def _mtls_files(
         .public_key(rogue_ca_key.public_key())
         .serial_number(_serial_number(world, security_runtime, "mtls-rogue-ca"))
         .not_valid_before(now)
-        .not_valid_after(now + datetime.timedelta(days=365))
+        .not_valid_after(now + datetime.timedelta(days=validity_days))
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
         .sign(rogue_ca_key, hashes.SHA256())
     )
 
+    rendered_config = config.model_copy(update={"cert_validity_days": validity_days})
     file_contents = {
-        "security/mtls/config.json": json.dumps(config.model_dump(), indent=2) + "\n"
+        "security/mtls/config.json": json.dumps(rendered_config.model_dump(), indent=2)
+        + "\n"
     }
     for service_id in config.mtls_services:
         weakness = next(iter(config.weaknesses.get(service_id, ())), None)
@@ -441,11 +451,9 @@ def _mtls_files(
             sans = [x509.DNSName(f"wrong-{service_id}.{zone}.svc.cluster.local")]
 
         not_valid_before = now
-        not_valid_after = now + datetime.timedelta(days=config.cert_validity_days)
+        not_valid_after = now + datetime.timedelta(days=validity_days)
         if weakness == "expired_cert":
-            not_valid_before = now - datetime.timedelta(
-                days=config.cert_validity_days + 30
-            )
+            not_valid_before = now - datetime.timedelta(days=validity_days + 30)
             not_valid_after = now - datetime.timedelta(days=1)
 
         signer_key = ca_key

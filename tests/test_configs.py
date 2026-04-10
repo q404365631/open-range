@@ -227,6 +227,45 @@ def test_security_runtime_materialization_is_deterministic(tmp_path: Path):
         ).read_text(encoding="utf-8")
 
 
+def test_security_runtime_mtls_cert_window_stays_long_lived(tmp_path: Path):
+    cryptography = pytest.importorskip("cryptography.x509")
+
+    pipeline = BuildPipeline(store=FileSnapshotStore(tmp_path / "snapshots"))
+    pipeline.build(
+        _manifest_payload(),
+        tmp_path / "rendered-security-window",
+        BuildConfig(
+            validation_profile="graph_only",
+            security_integration_enabled=True,
+            security_tier=3,
+        ),
+    )
+
+    ca_cert = cryptography.load_pem_x509_certificate(
+        (
+            tmp_path
+            / "rendered-security-window"
+            / "security"
+            / "mtls"
+            / "svc-db"
+            / "ca.pem"
+        ).read_bytes()
+    )
+    svc_cert = cryptography.load_pem_x509_certificate(
+        (
+            tmp_path
+            / "rendered-security-window"
+            / "security"
+            / "mtls"
+            / "svc-db"
+            / "cert.pem"
+        ).read_bytes()
+    )
+
+    assert ca_cert.not_valid_after_utc.year >= 2033
+    assert svc_cert.not_valid_after_utc.year >= 2033
+
+
 def test_renderer_applies_runtime_extensions_during_render(tmp_path: Path):
     manifest = validate_manifest(_manifest_payload())
     build_config = BuildConfig(validation_profile="graph_only")
