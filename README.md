@@ -219,7 +219,7 @@ uv run scripts/generate_traces.py \
 Or through the CLI:
 
 ```bash
-uv run openrange traces -m manifests/tier1_basic.yaml -o /tmp/openrange-traces --roots 3 --mutations 1
+openrange traces -m manifests/tier1_basic.yaml -o /tmp/openrange-traces --roots 3 --mutations 1
 ```
 
 The generator also writes role/source shards such as:
@@ -262,10 +262,10 @@ uv run -m pytest tests -q
 ## Development checks
 
 ```bash
-uv sync --group dev
-uv run ruff format --check .
+uv sync
+uv run ruff format .
 uv run ruff check .
-uv run pytest tests/ -v --tb=short
+uv run pytest
 uv run pre-commit install
 uv run pre-commit run --all-files
 ```
