@@ -11,6 +11,7 @@ from open_range.build_config import BuildConfig
 from open_range.code_web import code_web_payload
 from open_range.compiler import EnterpriseSaaSManifestCompiler
 from open_range.curriculum import FrontierMutationPolicy, PopulationStats
+from open_range.image_policy import SANDBOX_IMAGE_BY_ROLE, service_image_for_kind
 from open_range.pipeline import BuildPipeline
 from open_range.predicates import PredicateEngine
 from open_range.render import EnterpriseSaaSKindRenderer
@@ -105,11 +106,11 @@ def test_kind_renderer_emits_expected_files(tmp_path: Path):
     assert "sandbox-red" in artifacts.chart_values["sandboxes"]
     assert (
         artifacts.chart_values["sandboxes"]["sandbox-red"]["image"]
-        == "wbitt/network-multitool:alpine-extra"
+        == SANDBOX_IMAGE_BY_ROLE["red"]
     )
     assert (
         artifacts.chart_values["sandboxes"]["sandbox-blue"]["image"]
-        == "wbitt/network-multitool:alpine-extra"
+        == SANDBOX_IMAGE_BY_ROLE["blue"]
     )
     assert (
         artifacts.chart_values["services"]["svc-db"]["payloads"][0]["mountPath"]
@@ -132,7 +133,7 @@ def test_kind_renderer_emits_expected_files(tmp_path: Path):
         for rule in artifacts.chart_values["firewallRules"]
     )
     assert artifacts.pinned_image_digests["svc-web"].startswith(
-        "php:8.1-apache@sha256:"
+        f"{service_image_for_kind('web_app')}@sha256:"
     )
 
 

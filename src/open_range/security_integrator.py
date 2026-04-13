@@ -33,6 +33,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from open_range.image_policy import DB_MTLS_HELPER_IMAGE
 from open_range.runtime_extensions import (
     RuntimePort,
     RuntimeSidecar,
@@ -46,8 +47,6 @@ from open_range.security_runtime import (
 from open_range.world_ir import WorldIR
 
 logger = logging.getLogger(__name__)
-
-_WEB_DB_MTLS_SIDECAR_IMAGE = "wbitt/network-multitool:alpine-extra"
 
 
 # ---------------------------------------------------------------------------
@@ -600,7 +599,7 @@ class SecurityIntegrator:
                     svc_name,
                     RuntimeSidecar(
                         name="db-client-mtls",
-                        image=_WEB_DB_MTLS_SIDECAR_IMAGE,
+                        image=DB_MTLS_HELPER_IMAGE,
                         command=("/bin/sh", "-lc", "sleep infinity"),
                         include_service_payloads=True,
                     ),

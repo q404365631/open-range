@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from open_range.image_policy import DB_MTLS_HELPER_IMAGE
 from open_range.security_runtime import materialize_security_runtime
 from open_range.security_integrator import (
     DEFAULT_TIER_MAP,
@@ -244,7 +245,7 @@ class TestMTLSIntegration:
         )
         web_sidecar = ctx.service_runtime["svc-web"].sidecars[0]
         assert web_sidecar.name == "db-client-mtls"
-        assert web_sidecar.image == "wbitt/network-multitool:alpine-extra"
+        assert web_sidecar.image == DB_MTLS_HELPER_IMAGE
         assert web_sidecar.command == ("/bin/sh", "-lc", "sleep infinity")
         assert web_sidecar.include_service_payloads is True
         assert ctx.service_runtime["svc-idp"].env["LDAP_TLS_VERIFY_CLIENT"] == "demand"

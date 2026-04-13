@@ -10,6 +10,7 @@ import pytest
 from open_range.build_config import BuildConfig
 from open_range.compiler import EnterpriseSaaSManifestCompiler
 from open_range.episode_config import EpisodeConfig
+from open_range.image_policy import DB_MTLS_HELPER_IMAGE
 from open_range.manifest import validate_manifest
 from open_range.pipeline import BuildPipeline
 from open_range.render import EnterpriseSaaSKindRenderer
@@ -165,7 +166,7 @@ def test_build_config_can_enable_security_integration(tmp_path: Path):
         payload["mountPath"] == "/etc/mysql/conf.d/openrange-client-mtls.cnf"
         for payload in web_payloads
     )
-    assert web_sidecar["image"] == "wbitt/network-multitool:alpine-extra"
+    assert web_sidecar["image"] == DB_MTLS_HELPER_IMAGE
     assert web_sidecar["command"] == ["/bin/sh", "-lc", "sleep infinity"]
     assert any(payload["mountPath"] == "/etc/mtls/cert.pem" for payload in db_payloads)
     assert any(
