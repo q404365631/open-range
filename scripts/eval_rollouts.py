@@ -10,18 +10,18 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from open_range._runtime_store import hydrate_runtime_snapshot
-from open_range._trace_policies import reference_trace_pairs, trace_actions
 from open_range.build_config import OFFLINE_BUILD_CONFIG
 from open_range.curriculum import FrontierMutationPolicy, PopulationStats
-from open_range.driver import ScriptedRuntimeAgent
 from open_range.episode_config import EpisodeConfig
 from open_range.pipeline import BuildPipeline
+from open_range.probe_planner import runtime_action
 from open_range.resources import load_bundled_manifest
 from open_range.runtime import ReferenceDrivenRuntime
-from open_range.runtime_types import EpisodeScore
+from open_range.runtime_types import Action, EpisodeScore
 from open_range.sim import ReferenceSimPlane
 from open_range.snapshot import RuntimeSnapshot
 from open_range.store import FileSnapshotStore
+from open_range.training_data import normalize_trace_action
 
 
 def _default_manifest_name() -> str:
@@ -42,30 +42,20 @@ def _load_manifest(source: str | Path | None) -> dict[str, Any]:
     return load_bundled_manifest(str(source))
 
 
-def _scripted_agent(
-    snapshot: RuntimeSnapshot, actor: str, *, trace_index: int
-) -> ScriptedRuntimeAgent:
-    return ScriptedRuntimeAgent(trace_actions(snapshot, actor, trace_index=trace_index))
-
-
 def _run_mode(
     snapshot: RuntimeSnapshot, episode_config: EpisodeConfig
 ) -> dict[str, Any]:
     pair_reports: list[dict[str, Any]] = []
-    for attack_idx, defense_idx in reference_trace_pairs(snapshot, episode_config.mode):
+    for attack_idx, defense_idx in _reference_trace_pairs(
+        snapshot, episode_config.mode
+    ):
         runtime = ReferenceDrivenRuntime()
-        red_agent = _scripted_agent(snapshot, "red", trace_index=attack_idx)
-        blue_agent = _scripted_agent(snapshot, "blue", trace_index=defense_idx)
-        state = runtime.reset(
+        runtime.reset(
             snapshot,
             episode_config,
             reference_attack_index=attack_idx,
             reference_defense_index=defense_idx,
         )
-        if state.controls_red:
-            red_agent.reset(f"snapshot={snapshot.snapshot_id}", "red")
-        if state.controls_blue:
-            blue_agent.reset(f"snapshot={snapshot.snapshot_id}", "blue")
 
         turns = 0
         while not runtime.state().done:
@@ -75,8 +65,14 @@ def _run_mode(
                 if runtime.state().done:
                     break
                 raise
-            agent = red_agent if decision.actor == "red" else blue_agent
-            runtime.act(decision.actor, agent.act(decision.obs))
+            runtime.act(
+                decision.actor,
+                _reference_action(
+                    snapshot,
+                    decision.actor,
+                    runtime.reference_step(decision.actor),
+                ),
+            )
             turns += 1
 
         score = runtime.score()
@@ -201,6 +197,25 @@ def _population_stats(
         novelty=novelty,
         blue_signal_points=snapshot.validator_report.blue_signal_points,
     )
+
+
+def _reference_action(snapshot: RuntimeSnapshot, actor: str, expected) -> Action:
+    if expected is None:
+        return Action(actor_id=actor, role=actor, kind="sleep", payload={})
+    return normalize_trace_action(snapshot, runtime_action(actor, expected))
+
+
+def _reference_trace_pairs(
+    snapshot: RuntimeSnapshot, mode: str
+) -> tuple[tuple[int, int], ...]:
+    attack_count = max(1, len(snapshot.reference_bundle.reference_attack_traces))
+    defense_count = max(1, len(snapshot.reference_bundle.reference_defense_traces))
+    if mode == "red_only":
+        return tuple((idx, idx % defense_count) for idx in range(attack_count))
+    if mode in {"blue_only_live", "blue_only_from_prefix"}:
+        return tuple((idx % attack_count, idx) for idx in range(defense_count))
+    count = max(attack_count, defense_count)
+    return tuple((idx % attack_count, idx % defense_count) for idx in range(count))
 
 
 def evaluate_rollouts(

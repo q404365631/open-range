@@ -83,9 +83,9 @@ OpenRange V1 should not treat unconstrained free-form generation as the primary 
 Each exported decision row includes:
 
 - one chosen runtime action
-- the source of that action, such as `reference_runtime`, `reference_sim`, or `scripted_runtime`
+- the source of that action, such as `reference_runtime` or `reference_sim`
 
-This keeps trace export grounded in the public runtime loop while still making it possible to compare reference and scripted behaviors offline.
+This keeps trace export grounded in the public runtime loop while distinguishing live runtime rows from sim-derived bootstrap rows.
 
 ## Role Coverage
 

@@ -8,17 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from open_range._runtime_store import hydrate_runtime_snapshot
-from open_range._trace_policies import (
-    expected_step,
-    reference_action,
-    reference_trace_pairs,
-    scripted_runtime_action,
-)
 from open_range.build_config import OFFLINE_BUILD_CONFIG, BuildConfig
 from open_range.curriculum import FrontierMutationPolicy, PopulationStats
 from open_range.episode_config import EpisodeConfig
 from open_range.pipeline import BuildPipeline
+from open_range.probe_planner import runtime_action
 from open_range.runtime import ReferenceDrivenRuntime
+from open_range.runtime_types import Action
 from open_range.snapshot import RuntimeSnapshot
 from open_range.store import FileSnapshotStore
 from open_range.training_data import (
@@ -27,6 +23,7 @@ from open_range.training_data import (
     TraceLineage,
     grounded_effects_for_result,
     mitigation_effects_for_result,
+    normalize_trace_action,
     public_trace_action,
     render_action_text,
     row_to_sft_record,
@@ -124,7 +121,7 @@ class TraceDatasetGenerator:
 
             for snapshot_idx, snapshot in enumerate(snapshots):
                 if include_sim:
-                    for attack_idx, defense_idx in reference_trace_pairs(
+                    for attack_idx, defense_idx in _reference_trace_pairs(
                         snapshot, "joint_pool"
                     ):
                         raw_rows.extend(
@@ -142,7 +139,7 @@ class TraceDatasetGenerator:
                             )
                         )
                 for mode in DEFAULT_RUNTIME_MODES:
-                    for attack_idx, defense_idx in reference_trace_pairs(
+                    for attack_idx, defense_idx in _reference_trace_pairs(
                         snapshot, mode
                     ):
                         raw_rows.extend(
@@ -157,20 +154,8 @@ class TraceDatasetGenerator:
                                 defense_trace_index=defense_idx,
                             )
                         )
-                        raw_rows.extend(
-                            self._episode_rows(
-                                snapshot,
-                                _episode_config_for(mode),
-                                trace_source="runtime",
-                                action_source="scripted_runtime",
-                                split=dataset_split,
-                                lineage_root=lineage_root,
-                                attack_trace_index=attack_idx,
-                                defense_trace_index=defense_idx,
-                            )
-                        )
                 if include_joint_pool:
-                    for attack_idx, defense_idx in reference_trace_pairs(
+                    for attack_idx, defense_idx in _reference_trace_pairs(
                         snapshot, "joint_pool"
                     ):
                         raw_rows.extend(
@@ -181,20 +166,6 @@ class TraceDatasetGenerator:
                                 ),
                                 trace_source="runtime",
                                 action_source="reference_runtime",
-                                split=dataset_split,
-                                lineage_root=lineage_root,
-                                attack_trace_index=attack_idx,
-                                defense_trace_index=defense_idx,
-                            )
-                        )
-                        raw_rows.extend(
-                            self._episode_rows(
-                                snapshot,
-                                EpisodeConfig(
-                                    mode="joint_pool", scheduler_mode="strict_turns"
-                                ),
-                                trace_source="runtime",
-                                action_source="scripted_runtime",
                                 split=dataset_split,
                                 lineage_root=lineage_root,
                                 attack_trace_index=attack_idx,
@@ -244,20 +215,6 @@ class TraceDatasetGenerator:
             reference_attack_index=attack_trace_index,
             reference_defense_index=defense_trace_index,
         )
-        reference_steps = {
-            "red": list(
-                snapshot.reference_bundle.reference_attack_traces[
-                    attack_trace_index
-                ].steps
-            ),
-            "blue": list(
-                snapshot.reference_bundle.reference_defense_traces[
-                    defense_trace_index
-                ].steps
-            ),
-        }
-        reference_progress = {"red": 0, "blue": 0}
-        actor_decisions = {"red": 0, "blue": 0}
         rows: list[TraceDecisionRow] = []
         decision_index = 0
 
@@ -269,23 +226,9 @@ class TraceDatasetGenerator:
                     break
                 raise
             actor = decision.actor
-            expected = expected_step(reference_steps[actor], reference_progress[actor])
-            chosen_action = reference_action(snapshot, actor, expected)
-            if action_source == "scripted_runtime":
-                chosen_action = scripted_runtime_action(
-                    snapshot,
-                    actor=actor,
-                    observation=decision.obs,
-                    reference_action=chosen_action,
-                    decision_count=actor_decisions[actor],
-                    remaining_targets=runtime.remaining_red_targets(),
-                )
+            expected = runtime.reference_step(actor)
+            chosen_action = _reference_action(snapshot, actor, expected)
             result = runtime.act(actor, chosen_action)
-            if expected is not None and runtime.matches_reference_step(
-                chosen_action, expected, result.stdout
-            ):
-                reference_progress[actor] += 1
-            actor_decisions[actor] += 1
             public_action = public_trace_action(chosen_action)
             rows.append(
                 TraceDecisionRow(
@@ -462,11 +405,7 @@ def _write_role_source_shards(
                 f"raw.{role}.{source}",
                 [row for row in role_rows if row.trace_source == source],
             )
-        for action_source in (
-            "reference_runtime",
-            "scripted_runtime",
-            "reference_sim",
-        ):
+        for action_source in ("reference_runtime", "reference_sim"):
             add(
                 f"raw.{role}.source.{action_source}",
                 [row for row in role_rows if row.action_source == action_source],
@@ -489,11 +428,7 @@ def _write_role_source_shards(
                 sft_rows[f"sft.{role}.{source}"] = [
                     row_to_sft_record(row) for row in selected
                 ]
-        for action_source in (
-            "reference_runtime",
-            "scripted_runtime",
-            "reference_sim",
-        ):
+        for action_source in ("reference_runtime", "reference_sim"):
             selected = [row for row in role_rows if row.action_source == action_source]
             if selected:
                 sft_rows[f"sft.{role}.source.{action_source}"] = [
@@ -506,3 +441,22 @@ def _write_role_source_shards(
         shards[name] = str(path)
 
     return dict(sorted(shards.items()))
+
+
+def _reference_action(snapshot: RuntimeSnapshot, actor: str, expected) -> Action:
+    if expected is None:
+        return Action(actor_id=actor, role=actor, kind="sleep", payload={})
+    return normalize_trace_action(snapshot, runtime_action(actor, expected))
+
+
+def _reference_trace_pairs(
+    snapshot: RuntimeSnapshot, mode: str
+) -> tuple[tuple[int, int], ...]:
+    attack_count = max(1, len(snapshot.reference_bundle.reference_attack_traces))
+    defense_count = max(1, len(snapshot.reference_bundle.reference_defense_traces))
+    if mode == "red_only":
+        return tuple((idx, idx % defense_count) for idx in range(attack_count))
+    if mode in {"blue_only_live", "blue_only_from_prefix"}:
+        return tuple((idx % attack_count, idx) for idx in range(defense_count))
+    count = max(attack_count, defense_count)
+    return tuple((idx % attack_count, idx % defense_count) for idx in range(count))

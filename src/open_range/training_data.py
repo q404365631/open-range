@@ -16,7 +16,7 @@ from open_range.snapshot import RuntimeSnapshot
 
 TraceSource = Literal["runtime", "sim"]
 TraceSplit = Literal["train", "val", "test"]
-ActionSource = Literal["reference_runtime", "reference_sim", "scripted_runtime"]
+ActionSource = Literal["reference_runtime", "reference_sim"]
 _HIDDEN_ACTION_PAYLOAD_KEYS = frozenset({"service_command"})
 
 
