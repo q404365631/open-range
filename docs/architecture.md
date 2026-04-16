@@ -49,7 +49,7 @@ strict manifest
 ## Bootstrap traces
 
 - optional bootstrap or warm-start traces come from the sim plane, not the core runtime contract
-- `ReferenceSimPlane` replays private references through the public decision loop to generate cheap deterministic traces
+- sim-plane tooling may replay private references through the public decision loop to generate cheap deterministic traces
 - this keeps training warmup logic separate from the environment surface while preserving the old synthetic-bootstrap idea as a tooling layer
 
 ## Training data
