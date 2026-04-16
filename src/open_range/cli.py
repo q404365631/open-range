@@ -14,6 +14,11 @@ import yaml
 
 from open_range.build_config import BuildConfig
 from open_range.cluster import KindBackend
+from open_range.eval_remote_model_rollouts import (
+    DEFAULT_ENDPOINT,
+    DEFAULT_MODEL,
+    evaluate_remote_model_rollouts,
+)
 from open_range.episode_config import EpisodeConfig
 from open_range.k3d_runner import K3dBackend
 from open_range.pipeline import BuildPipeline
@@ -444,6 +449,104 @@ def traces_cmd(
     click.echo(f"  Raw Rows: {report.raw_path}")
     click.echo(f"  Decision SFT: {report.decision_sft_path}")
     click.echo(f"  Report: {report_path}")
+
+
+@cli.command("eval")
+@click.option(
+    "--endpoint",
+    default=DEFAULT_ENDPOINT,
+    show_default=True,
+    help="OpenAI-compatible /v1/chat/completions endpoint URL.",
+)
+@click.option(
+    "--model",
+    default=DEFAULT_MODEL,
+    show_default=True,
+    help="Model id sent to the OpenAI-compatible endpoint.",
+)
+@click.option(
+    "--api-key",
+    default="",
+    envvar="OPENAI_API_KEY",
+    show_envvar=True,
+    help="Optional API key for the remote chat endpoint.",
+)
+@click.option(
+    "--validation-profile",
+    default="full",
+    show_default=True,
+    type=click.Choice(["full", "no_necessity", "graph_plus_live", "graph_only"]),
+    help="Admission strictness. Use graph_only only for explicit offline eval.",
+)
+@click.option(
+    "--manifest",
+    default=None,
+    help="Bundled manifest name or path to strict manifest YAML.",
+)
+@click.option(
+    "--mutations",
+    default=3,
+    show_default=True,
+    type=int,
+    help="How many admitted child mutations to evaluate after the base snapshot.",
+)
+@click.option(
+    "--max-turns",
+    default=8,
+    show_default=True,
+    type=int,
+    help="Maximum external red decisions per attack trace pair.",
+)
+@click.option(
+    "--timeout",
+    default=60.0,
+    show_default=True,
+    type=float,
+    help="HTTP timeout in seconds for remote model calls.",
+)
+@click.option(
+    "-o",
+    "--output",
+    "output_path",
+    default="/tmp/openrange-remote-model-rollout.json",
+    show_default=True,
+    type=click.Path(),
+    help="Where to write the rollout eval report JSON.",
+)
+def eval_cmd(
+    endpoint: str,
+    model: str,
+    api_key: str,
+    validation_profile: str,
+    manifest: str | None,
+    mutations: int,
+    max_turns: int,
+    timeout: float,
+    output_path: str,
+) -> None:
+    """Run the remote model rollout eval against admitted OpenRange snapshots."""
+    result = evaluate_remote_model_rollouts(
+        endpoint=endpoint,
+        model=model,
+        api_key=api_key,
+        validation_profile=validation_profile,
+        manifest=manifest,
+        mutations=mutations,
+        max_turns=max_turns,
+        timeout_s=timeout,
+        quiet=True,
+    )
+    report_path = _write_json(result, Path(output_path))
+
+    click.echo(f"Remote model eval written to {report_path}")
+    click.echo(f"  Endpoint: {result['endpoint']}")
+    click.echo(f"  Model: {result['model']}")
+    click.echo(f"  Validation Profile: {result['validation_profile']}")
+    click.echo(f"  Snapshots: {result['snapshot_count']}")
+    click.echo(f"  Red Win Rate: {result['red_win_rate']:.3f}")
+    click.echo(f"  Exact Pick Rate: {result['exact_pick_rate']:.3f}")
+    click.echo(f"  Valid Response Rate: {result['valid_response_rate']:.3f}")
+    click.echo(f"  Avg Latency (ms): {result['avg_latency_ms']:.1f}")
 
 
 @cli.command("grpo")

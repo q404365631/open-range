@@ -53,7 +53,7 @@ include = ["open_range*"]
 
 [tool.pytest.ini_options]
 markers = [
-    "live_model: runs live LiteLLM model smoke tests",
+    "live_model: runs opt-in live remote model smoke tests",
 ]
 
 [tool.ruff]
