@@ -7,9 +7,11 @@ Thanks for contributing.
 Small bug fixes, tests, docs improvements, and scoped quality-of-life changes are
 great candidates for pull requests.
 
-For larger features, behavioral changes, or broad refactors, please start with
-an issue or discussion before investing heavily in implementation. That helps us
-align on scope early and avoids wasted work.
+Please start with an issue or discussion before investing heavily in:
+
+- larger features or scope-expanding behavior
+- admission, runtime, or validation contract changes
+- broad refactors or compatibility shims back toward the deleted architecture
 
 ## Local Setup
 
@@ -47,6 +49,10 @@ Optional Docker parse check:
 docker buildx build --check -f Dockerfile .
 ```
 
+For local iteration, prefer targeted tests first. If your change touches
+admission, runtime, Kind-backed flows, training, or evaluation, include the
+exact non-routine verification commands you ran in the PR description.
+
 ## Pull Requests
 
 Good pull requests are usually:
@@ -56,15 +62,21 @@ Good pull requests are usually:
 - backed by tests when behavior changes
 - accompanied by doc updates when public behavior or workflows change
 
+Target `dev` by default unless a maintainer asks for a different base branch.
+
 Use the repository PR template in
 [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md).
 
 Keep the `Testing` section short and factual:
 
-- list the command(s) you ran
-- mark them pass/fail
-- if something was not run, say so plainly
+- list only manual or non-routine verification that reviewers would not
+  otherwise see in CI
+- if there was no special verification beyond CI-covered lint/unit checks, say
+  that plainly
 - do not paste long terminal transcripts into the PR body
+
+Use `Review Notes` only for reviewer focus areas, tradeoffs, risks, or follow-up
+work.
 
 ## Project Context
 

@@ -1,16 +1,23 @@
 # AGENTS.md
 
 Guidance for coding agents working in the current OpenRange repo.
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) for local setup, checks, and pull
+request format.
 
-## What OpenRange Is
+## Repo-Specific Rules
 
-OpenRange is a standalone, manifest-first Python package for building, admitting,
-storing, and running bounded enterprise cyber worlds.
+- Keep public docs and examples on the package entry points:
+  `openrange`, `openrange-demo`, and `openrange-bootstrap-demo`.
+- Use `uv run -m ...` only for module-only repo commands.
+- Default pull requests should target `dev`, not `main`, unless asked
+  otherwise.
+- Keep changes focused, and add tests when behavior changes.
 
-It is not the old OpenEnv server/client stack.
-It is not the old public golden-path architecture.
+## Product Boundary
 
-The core contract is:
+- OpenRange is a manifest-first Python package, not the legacy OpenEnv
+  server/client stack and not the old public golden-path architecture.
+- The core contract is:
 
 1. public manifest
 2. compile to `WorldIR`
@@ -21,10 +28,8 @@ The core contract is:
 7. freeze an immutable snapshot
 8. run episodes through the decision-loop runtime
 
-## Current Objective
-
-OpenRange is a validator-admitted enterprise web-security training environment
-that combines:
+The current objective is a validator-admitted enterprise web-security training
+environment that combines:
 
 - exact code-level web flaws
 - exact config, workflow, secret, and telemetry weaknesses
@@ -48,49 +53,33 @@ Do not broaden the claim to:
 - The public manifest defines the business, not the answer key.
 - `WorldIR` is the canonical typed world model.
 - `ReferenceBundle` is private validator-owned oracle data.
-- Public `Snapshot` objects do not carry references by default.
-- Runtime/admission use hydrated runtime snapshots when references are needed.
+- Public `Snapshot` objects do not carry references by default; hydrate through
+  the store when references are needed.
 - Training runs on immutable admitted snapshots only.
 - Green is environment-owned at runtime, not trainer-stepped.
 - Runtime is decision-driven via `next_decision()` and `act()`.
-- Rewards and terminal conditions are objective/event grounded.
-- `BuildConfig` and `EpisodeConfig` are the only official ablation surfaces.
 
-## Admission Rules
+## Validation Rules
 
-`LocalAdmissionController` is an admission controller, not a loose test suite.
+- `LocalAdmissionController` is an admission gate, not a loose test suite.
+- It must establish that the world makes structural sense, at least one
+  reference attack path works, at least one reference defense path works,
+  necessity and shortcut checks pass, and the world is stable enough to train
+  on.
+- `validation_profile="full"` is the claim-strong path and requires live Kind
+  validation on the public pipeline path.
+- Offline or reduced workflows must opt into a weaker profile explicitly, such
+  as `graph_only`.
+- Do not silently downgrade validation strength.
 
-It must answer:
-
-- does the world make structural sense?
-- does at least one reference attack path work?
-- does at least one reference defense path work?
-- do necessity and shortcut checks pass?
-- is the world stable enough to train on?
-
-Important:
-
-- `validation_profile="full"` is claim-strong and requires live Kind validation
-  when using the public pipeline path
-- offline or reduced-validation workflows must opt into a weaker profile
-  explicitly, such as `graph_only`
-
-## References, Not Golden Paths
-
-Use the current naming:
+## Naming And Leakage
 
 - `ReferenceBundle`
 - `reference_attack_traces`
 - `reference_defense_traces`
-
-Do not reintroduce public golden-path semantics in the package surface.
-
-References are:
-
-- private
-- validator-owned
-- executable
-- not the public environment contract
+- Do not reintroduce public golden-path semantics in the package surface.
+- Do not leak hidden weakness inventory or private reference data into public
+  APIs, snapshots, or prompt text.
 
 ## Snapshot Boundary
 
@@ -161,8 +150,8 @@ Prefer `uv run -m ...` for Python commands in this repo.
 - keep the `Testing` section terse and factual
 - do not list routine Ruff, formatting, or generic unit-test commands in the PR body when CI already runs them
 - reserve the `Testing` section for manual verification, integration checks, Kind/admission runs, training/eval smoke tests, or anything else the workflow does not already cover
-- if there was no special verification beyond CI-covered lint/unit checks, do not call that out in the PR body
-- do not add meta-commentary about omitted routine checks; either list non-routine verification only, or leave the `Testing` section empty / omit it
+- if there was no special verification beyond CI-covered lint/unit checks, either say that plainly or leave the `Testing` section empty
+- do not add meta-commentary about omitted routine checks
 - do not paste long verification logs or terminal transcripts into the PR body
 - include the exact verification commands used in the PR description for admission, runtime, Kind-backed, training, or other non-routine validation
 - use `Review Notes` only for reviewer-relevant context such as risks, tradeoffs, or follow-up work
@@ -170,10 +159,9 @@ Prefer `uv run -m ...` for Python commands in this repo.
 ## Review Priorities
 
 When reviewing or changing code, prioritize:
-
 1. architectural drift from the current objective
 2. hidden-oracle leakage
 3. silent downgrade from live to offline validation
-4. reward/objective mismatch between admission and runtime
+4. reward or objective mismatch between admission and runtime
 5. training-data mismatch with the actual runtime surface
 6. stale compatibility shims back toward the deleted architecture
