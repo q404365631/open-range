@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from open_range.episode_config import DEFAULT_EPISODE_CONFIG, EpisodeConfig
-from open_range.runtime import ReferenceDrivenRuntime
+from open_range.runtime import OpenRangeRuntime
 from open_range.runtime_types import Action, Observation
 from open_range.snapshot import RuntimeSnapshot
 
@@ -38,7 +38,7 @@ class EpisodeTrace:
 class TandemEpisodeDriver:
     """Drive a full episode against separate red and blue sessions."""
 
-    def __init__(self, runtime: ReferenceDrivenRuntime) -> None:
+    def __init__(self, runtime: OpenRangeRuntime) -> None:
         self.runtime = runtime
 
     def run_episode(

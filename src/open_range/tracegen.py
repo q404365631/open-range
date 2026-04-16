@@ -7,26 +7,30 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from open_range._decision_sft import row_to_sft_record
+from open_range._reference_replay import (
+    action_for_reference_step,
+    reference_trace_pairs,
+)
 from open_range._runtime_store import hydrate_runtime_snapshot
 from open_range.build_config import OFFLINE_BUILD_CONFIG, BuildConfig
 from open_range.curriculum import FrontierMutationPolicy, PopulationStats
 from open_range.episode_config import EpisodeConfig
 from open_range.pipeline import BuildPipeline
-from open_range.probe_planner import runtime_action
-from open_range.runtime import ReferenceDrivenRuntime
-from open_range.runtime_types import Action
+from open_range.runtime import OpenRangeRuntime
 from open_range.snapshot import RuntimeSnapshot
 from open_range.store import FileSnapshotStore
 from open_range.training_data import (
+    ActionSource,
     TraceDatasetReport,
     TraceDecisionRow,
     TraceLineage,
+    TraceSource,
+    TraceSplit,
     grounded_effects_for_result,
     mitigation_effects_for_result,
-    normalize_trace_action,
     public_trace_action,
     render_action_text,
-    row_to_sft_record,
     trace_benchmark_tags,
     trace_weaknesses,
 )
@@ -121,7 +125,7 @@ class TraceDatasetGenerator:
 
             for snapshot_idx, snapshot in enumerate(snapshots):
                 if include_sim:
-                    for attack_idx, defense_idx in _reference_trace_pairs(
+                    for attack_idx, defense_idx in reference_trace_pairs(
                         snapshot, "joint_pool"
                     ):
                         raw_rows.extend(
@@ -139,7 +143,7 @@ class TraceDatasetGenerator:
                             )
                         )
                 for mode in DEFAULT_RUNTIME_MODES:
-                    for attack_idx, defense_idx in _reference_trace_pairs(
+                    for attack_idx, defense_idx in reference_trace_pairs(
                         snapshot, mode
                     ):
                         raw_rows.extend(
@@ -155,7 +159,7 @@ class TraceDatasetGenerator:
                             )
                         )
                 if include_joint_pool:
-                    for attack_idx, defense_idx in _reference_trace_pairs(
+                    for attack_idx, defense_idx in reference_trace_pairs(
                         snapshot, "joint_pool"
                     ):
                         raw_rows.extend(
@@ -201,14 +205,14 @@ class TraceDatasetGenerator:
         snapshot: RuntimeSnapshot,
         episode_config: EpisodeConfig,
         *,
-        trace_source: str,
-        action_source: str,
-        split: str,
+        trace_source: TraceSource,
+        action_source: ActionSource,
+        split: TraceSplit,
         lineage_root: str,
         attack_trace_index: int = 0,
         defense_trace_index: int = 0,
     ) -> list[TraceDecisionRow]:
-        runtime = ReferenceDrivenRuntime()
+        runtime = OpenRangeRuntime()
         runtime.reset(
             snapshot,
             episode_config,
@@ -227,14 +231,14 @@ class TraceDatasetGenerator:
                 raise
             actor = decision.actor
             expected = runtime.reference_step(actor)
-            chosen_action = _reference_action(snapshot, actor, expected)
+            chosen_action = action_for_reference_step(snapshot, actor, expected)
             result = runtime.act(actor, chosen_action)
             public_action = public_trace_action(chosen_action)
             rows.append(
                 TraceDecisionRow(
-                    trace_source=trace_source,  # type: ignore[arg-type]
-                    action_source=action_source,  # type: ignore[arg-type]
-                    split=split,  # type: ignore[arg-type]
+                    trace_source=trace_source,
+                    action_source=action_source,
+                    split=split,
                     snapshot_id=snapshot.snapshot_id,
                     world_id=snapshot.world.world_id,
                     world_hash=snapshot.world_hash,
@@ -441,22 +445,3 @@ def _write_role_source_shards(
         shards[name] = str(path)
 
     return dict(sorted(shards.items()))
-
-
-def _reference_action(snapshot: RuntimeSnapshot, actor: str, expected) -> Action:
-    if expected is None:
-        return Action(actor_id=actor, role=actor, kind="sleep", payload={})
-    return normalize_trace_action(snapshot, runtime_action(actor, expected))
-
-
-def _reference_trace_pairs(
-    snapshot: RuntimeSnapshot, mode: str
-) -> tuple[tuple[int, int], ...]:
-    attack_count = max(1, len(snapshot.reference_bundle.reference_attack_traces))
-    defense_count = max(1, len(snapshot.reference_bundle.reference_defense_traces))
-    if mode == "red_only":
-        return tuple((idx, idx % defense_count) for idx in range(attack_count))
-    if mode in {"blue_only_live", "blue_only_from_prefix"}:
-        return tuple((idx % attack_count, idx) for idx in range(defense_count))
-    count = max(attack_count, defense_count)
-    return tuple((idx % attack_count, idx % defense_count) for idx in range(count))

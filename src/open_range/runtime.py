@@ -1,4 +1,4 @@
-"""Reference-driven runtime with simulated time and internal green progression."""
+"""Decision-loop runtime with simulated time and internal green progression."""
 
 from __future__ import annotations
 
@@ -33,8 +33,8 @@ from open_range.runtime_types import (
 from open_range.snapshot import RuntimeSnapshot
 
 
-class ReferenceDrivenRuntime:
-    """Runtime for admitted snapshots with actor-specific decisions."""
+class OpenRangeRuntime:
+    """Decision-loop runtime for admitted snapshots with actor-specific decisions."""
 
     def __init__(
         self,
@@ -268,7 +268,7 @@ class ReferenceDrivenRuntime:
 
     @staticmethod
     def matches_reference_step(action: Action, expected, live_stdout: str) -> bool:
-        return ReferenceDrivenRuntime._matches_step(action, expected, live_stdout)
+        return OpenRangeRuntime._matches_step(action, expected, live_stdout)
 
     def _apply_prefix_start(self) -> None:
         if self._snapshot is None:
@@ -1292,6 +1292,10 @@ class ReferenceDrivenRuntime:
         if requested is not None:
             return requested % count
         return (fallback + self._reset_seq - 1) % count
+
+
+# Backward-compatible alias for callers still importing the old internal name.
+ReferenceDrivenRuntime = OpenRangeRuntime
 
 
 def _initial_due_times(config: EpisodeConfig) -> dict[str, float]:

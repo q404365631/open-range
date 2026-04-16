@@ -56,11 +56,7 @@ from open_range.training_data import (
     TraceDatasetReport,
     TraceDecisionRow,
     TraceLineage,
-    build_decision_prompt,
-    render_action_completion,
     render_action_text,
-    render_decision_prompt,
-    system_prompt_for_role,
 )
 from open_range.world_ir import WorldIR
 
@@ -107,7 +103,6 @@ __all__ = [
     "admit",
     "admit_child",
     "build",
-    "build_decision_prompt",
     "bundled_docs_dir",
     "bundled_manifest_dir",
     "bundled_manifest_names",
@@ -119,11 +114,8 @@ __all__ = [
     "load_bundled_manifest_registry",
     "load_bundled_schema",
     "manifest_schema",
-    "render_action_completion",
     "render_action_text",
-    "render_decision_prompt",
     "resource_root",
-    "system_prompt_for_role",
     "validate_manifest",
     "world_hash",
 ]
