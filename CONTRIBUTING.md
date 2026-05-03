@@ -1,0 +1,81 @@
+# Contributing to OpenRange
+
+Thanks for contributing.
+
+## What To Work On
+
+We welcome contributions of all sizes. A good place to start is the issue board:
+pick up an open issue, ask a question, or suggest a direction before you begin.
+Discussion in issues and on Discord should be low-friction; if something is
+unclear, please ask.
+
+Feedback is also useful even when it does not come with code. Bug reports,
+documentation notes, design questions, and examples all help the project move
+forward. Another strong way to contribute is by creating or improving a pack;
+the current overview is in [the pack section of the OpenRange docs](docs/openrange.md#pack).
+
+## Local Setup
+
+OpenRange uses [`uv`](https://github.com/astral-sh/uv) for local development.
+
+```bash
+uv sync --group dev
+```
+
+Useful smoke checks:
+
+```bash
+uv run openrange --help
+```
+
+Strands dependencies are optional:
+
+```bash
+uv sync --extra strands
+```
+
+## Checks
+
+Before opening a pull request, run the checks relevant to your change.
+
+```bash
+uv run ruff check .
+uv run mypy src tests examples main.py
+uv run coverage run -m pytest tests
+uv run coverage report
+```
+
+For local iteration, prefer targeted tests first. If your change touches
+runtime, dashboard, training, or evaluation, include the exact non-routine
+verification commands you ran in the PR description.
+
+## Pull Requests
+
+Good pull requests are usually:
+
+- scoped to one clear change
+- explicit about what changed and why
+- backed by tests when behavior changes
+- accompanied by doc updates when public behavior or workflows change
+
+Use the repository PR template in
+[.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md).
+
+Keep the `Testing` section short and factual:
+
+- list only manual or non-routine verification that reviewers would not
+  otherwise see in CI
+- if there was no special verification beyond CI-covered lint/unit checks, say
+  that plainly
+- do not paste long terminal transcripts into the PR body
+
+Use `Review Notes` only for reviewer focus areas, tradeoffs, risks, or follow-up
+work.
+
+## Project Context
+
+If you need more background before changing core behavior, start with:
+
+- [`docs/openrange.md`](docs/openrange.md)
+- [`docs/dashboard.md`](docs/dashboard.md)
+- [`AGENTS.md`](AGENTS.md) for repo-specific Codex guidance

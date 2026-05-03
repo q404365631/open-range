@@ -1,0 +1,38 @@
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local config and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.uv-cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.openrange-runs/
+or-runs/
+
+# JavaScript
+node_modules/
+
+# Other
+TASKLIST.md
+snapshots/
