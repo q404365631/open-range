@@ -12,7 +12,7 @@ unclear, please ask.
 Feedback is also useful even when it does not come with code. Bug reports,
 documentation notes, design questions, and examples all help the project move
 forward. Another strong way to contribute is by creating or improving a pack;
-the current overview is in [the pack section of the OpenRange docs](docs/openrange.md#pack).
+the current overview is in [the pack section of the OpenRange docs](docs/start_here.md#pack).
 
 ## Local Setup
 
@@ -76,6 +76,6 @@ work.
 
 If you need more background before changing core behavior, start with:
 
-- [`docs/openrange.md`](docs/openrange.md)
+- [`docs/start_here.md`](docs/start_here.md)
 - [`docs/dashboard.md`](docs/dashboard.md)
 - [`.rules`](.rules) for repo-specific rules

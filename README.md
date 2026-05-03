@@ -43,7 +43,7 @@ This lets OpenRange support different domains — cyber ranges, trading environm
 
 **Episodes** reset an admitted snapshot into separate environment and agent workspaces, run the agent, collect final state, and return a structured result — not a scalar reward. A training adapter maps that result into whatever signal your setup needs.
 
-See [docs/openrange.md](docs/openrange.md) for the full design breakdown.
+See [docs/start_here.md](docs/start_here.md) for the full design breakdown.
 
 ## Install
 
@@ -136,7 +136,7 @@ CONTRIBUTING.md   contribution workflow and local setup
 
 Start with:
 
-- [OpenRange overview](docs/openrange.md)
+- [OpenRange overview](docs/start_here.md)
 - [API lifecycle](docs/api.md)
 - [Dashboard](docs/dashboard.md)
 - [Contributing](CONTRIBUTING.md)
