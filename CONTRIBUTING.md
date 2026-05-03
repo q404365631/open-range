@@ -78,4 +78,4 @@ If you need more background before changing core behavior, start with:
 
 - [`docs/openrange.md`](docs/openrange.md)
 - [`docs/dashboard.md`](docs/dashboard.md)
-- [`AGENTS.md`](AGENTS.md) for repo-specific Codex guidance
+- [`.rules`](.rules) for repo-specific rules
