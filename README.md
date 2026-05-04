@@ -28,6 +28,8 @@ Join us every **Friday at 12:00 PM CT** for the Open Range Community Call.
 
 ## How it works
 
+![high-level overview](assets/openrange_high-level.svg)
+
 OpenRange turns a request into an admitted world an agent can act inside:
 
 ```text

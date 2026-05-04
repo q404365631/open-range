@@ -49,6 +49,12 @@ For local iteration, prefer targeted tests first. If your change touches
 runtime, dashboard, training, or evaluation, include the exact non-routine
 verification commands you ran in the PR description.
 
+## Commit Messages
+
+Use [Conventional Commits](https://www.conventionalcommits.org/) for commit
+messages. Prefer concise prefixes such as `feat:`, `fix:`, `docs:`, `test:`,
+`refactor:`, and `chore:`.
+
 ## Pull Requests
 
 Good pull requests are usually:
